@@ -37,9 +37,14 @@ KERNEL_PATTERN = re.compile(
 # Pattern for a single param: __gm__ type* name or similar
 PARAM_PATTERN = re.compile(r"__gm__\s*(\w+)\s*\*\s*(\w+)")
 
+# Pattern for a scalar param: type name (no pointer, no __gm__)
+SCALAR_PARAM_PATTERN = re.compile(r"^(\w+)\s+(\w+)$")
 
-def parse_kernel_signature(line: str, rest: str = "") -> tuple[str, list[tuple[str, str]]] | None:
-    """Match __global__ AICORE void name(...) { and return (name, [(type, name), ...])."""
+
+def parse_kernel_signature(
+    line: str, rest: str = ""
+) -> tuple[str, list[tuple[str, str, bool]]] | None:
+    """Match __global__ AICORE void name(...) { and return (name, [(type, name, is_ptr), ...])."""
     combined = (line + rest).strip()
     m = KERNEL_PATTERN.search(combined)  # search in case of leading whitespace
     if not m:
@@ -48,25 +53,30 @@ def parse_kernel_signature(line: str, rest: str = "") -> tuple[str, list[tuple[s
     params_str = m.group(2).strip()
     if not params_str:
         return (kernel_name, [])
-    params = []
+    params: list[tuple[str, str, bool]] = []
     for part in params_str.split(","):
         part = part.strip()
         pm = PARAM_PATTERN.search(part)
         if pm:
-            params.append((pm.group(1), pm.group(2)))  # type, name
-        else:
-            # Fallback: treat as "type* name"
-            simple = re.match(r"(\w+)\s*\*\s*(\w+)", part)
-            if simple:
-                params.append((simple.group(1), simple.group(2)))
+            params.append((pm.group(1), pm.group(2), True))
+            continue
+        scalar = SCALAR_PARAM_PATTERN.match(part)
+        if scalar:
+            params.append((scalar.group(1), scalar.group(2), False))
     return (kernel_name, params)
 
 
-def build_call_wrapper(kernel_name: str, params: list[tuple[str, str]]) -> str:
-    """Build extern "C" void call_kernel(uint32_t blockDim, void* stream, uint8_t* v1, ...)."""
-    param_decls = ["uint8_t* " + name for _, name in params]
-    args = ["uint32_t blockDim", "void* stream"] + param_decls
-    cast_args = ["(" + typ + " *)" + name for typ, name in params]
+def build_call_wrapper(kernel_name: str, params: list[tuple[str, str, bool]]) -> str:
+    """Build extern "C" void call_kernel(uint32_t blockDim, void* stream, ...)."""
+    param_decls = []
+    cast_args = []
+    for typ, name, is_ptr in params:
+        if is_ptr:
+            param_decls.append(f"uint8_t* {name}")
+            cast_args.append(f"({typ} *){name}")
+        else:
+            param_decls.append(f"{typ} {name}")
+            cast_args.append(name)
     return '''extern "C" void call_kernel(
     uint32_t blockDim, void* stream,
     {param_list})
@@ -87,7 +97,7 @@ def convert(content: str) -> str:
     out: list[str] = []
     i = 0
     kernel_name: str | None = None
-    kernel_params: list[tuple[str, str]] = []
+    kernel_params: list[tuple[str, str, bool]] = []
 
     # Find kernel signature (single line or multi-line)
     for idx, rline in enumerate(lines):
