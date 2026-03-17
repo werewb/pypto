@@ -132,6 +132,29 @@ Apply consistently across all work:
 - **Error Checking**: Use appropriate patterns (CHECK vs INTERNAL_CHECK)
 - **Consistency**: Follow existing code patterns and naming conventions
 
+### Test-Driven Development for New Features
+
+When adding a new feature, follow this order:
+
+1. **Write tests first** — add tests to the appropriate file under `tests/ut/`
+   that target the missing functionality. Tests must assert the expected behavior.
+2. **Run tests — expect failure** — confirm the new tests fail (proving the
+   feature is genuinely absent, not accidentally passing).
+3. **Implement the feature** — write the minimum code to make the tests pass.
+4. **Run tests — expect success** — confirm all tests now pass before reporting done.
+
+Never skip step 2. A test that passes before the feature exists gives false confidence.
+
+### Run Tests After Every Implementation
+
+**After completing any code change (new feature, bug fix, or refactor), always:**
+
+1. Identify which test files cover the changed code
+2. Run those tests immediately — do not wait for the commit step
+3. Report test results to the user before declaring the task done
+
+If tests fail, fix them before reporting completion.
+
 ## Quick Checklist
 
 Before committing:
@@ -144,6 +167,8 @@ Before committing:
 - [ ] External input validated, safe APIs only
 - [ ] Tests cover changes, documentation updated
 - [ ] No AI co-author lines in commit message
+- [ ] For new features: tests written and confirmed failing BEFORE implementation
+- [ ] Tests run and passing after implementation (before declaring done)
 
 ## Remember
 
