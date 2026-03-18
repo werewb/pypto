@@ -18,6 +18,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -208,6 +209,7 @@ class PTOCodegen : public CodegenBase {
   void VisitExpr_(const ir::MaxPtr& op) override;
   void VisitExpr_(const ir::MinPtr& op) override;
   void VisitExpr_(const ir::NotPtr& op) override;
+  void VisitExpr_(const ir::TupleGetItemExprPtr& op) override;
 
  private:
   /**
@@ -255,6 +257,7 @@ class PTOCodegen : public CodegenBase {
    */
   std::string GetTileBufForMemRef(const ir::MemRefPtr& memref);
 
+
   // Output streams
   std::ostringstream stream_;
   std::ostringstream constants_section_;
@@ -273,12 +276,20 @@ class PTOCodegen : public CodegenBase {
   std::map<double, std::string> float_const_names_;
   std::set<int64_t> emitted_i64_constants_;  // For addr operands
 
+  /// Maps tuple var name → MakeTuple expression for TupleGetItemExpr resolution
+  std::map<std::string, ir::MakeTuplePtr> tuple_var_to_make_tuple_;
+
   /// Dynamically allocated tile buffers (SSA name, type string) emitted at function scope
   std::vector<std::pair<std::string, std::string>> extra_alloc_tiles_;
   /// Maps extra tile buffer SSA names to their type strings (for correct type annotations)
   std::map<std::string, std::string> extra_tile_buf_types_;
 
   int temp_counter_ = 0;
+
+  /// Nesting depth for indirect-select mode. >0 means we're inside a scf.if
+  /// that selects a value that cannot be returned directly (e.g., memref-like types).
+  /// YieldStmt yields an intermediate scalar (addr for TileType; ptr for TensorType in future).
+  int indirect_select_depth_ = 0;
 
   // Current function context
   ir::FunctionPtr current_function_;

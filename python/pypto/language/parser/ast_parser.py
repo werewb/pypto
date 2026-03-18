@@ -120,6 +120,14 @@ class ASTParser:
         # Scalar fields map to a single ir.Var; array fields map to list[ir.Var].
         self.tiling_registry: dict[str, dict[str, ir.Var | list[ir.Var]]] = {}
 
+        # Counter for generating unique names in variable tuple index lowering
+        self._tuple_idx_counter: int = 0
+
+        # Registry mapping variable names to their constant-integer-tuple values.
+        # Populated when a simple assignment like `event_ids = (0, 1)` is parsed.
+        # Used by the sync-op statement expander to generate per-branch IfStmt chains.
+        self._const_tuple_registry: dict[str, list[int]] = {}
+
     def parse_function(
         self,
         func_def: ast.FunctionDef,
@@ -436,6 +444,12 @@ class ASTParser:
                 value_expr = self.parse_expression(stmt.value)
                 var = self.builder.let(var_name, value_expr, span=span)
                 self.scope_manager.define_var(var_name, var, span=span)
+                # Register constant-integer tuples for sync-op event_id expansion
+                if isinstance(stmt.value, ast.Tuple) and all(
+                    isinstance(elt, ast.Constant) and isinstance(elt.value, int)
+                    for elt in stmt.value.elts
+                ):
+                    self._const_tuple_registry[var_name] = [elt.value for elt in stmt.value.elts]  # type: ignore[union-attr]
                 return
 
         raise ParserSyntaxError(
@@ -1252,6 +1266,110 @@ class ASTParser:
         span = self.span_tracker.get_span(stmt)
         self.builder.continue_stmt(span)
 
+    # -----------------------------------------------------------------------
+    # Sync-op statement expander — event_id=tuple[index] support
+    # -----------------------------------------------------------------------
+
+    _SYNC_OP_NAMES: frozenset[str] = frozenset({"sync_src", "sync_dst"})
+
+    def _try_expand_sync_op_stmt(self, node: ast.expr) -> bool:
+        """Try to expand a system sync-op call with a subscript event_id.
+
+        When a sync op is written as:
+            pl.system.sync_src(..., event_id=event_ids[buf_idx])
+        where ``event_ids`` is a tuple of integer constants, this expands it
+        into an if-else chain so each branch contains a sync call with a
+        static constant event_id (required by the PTOAS hardware backend).
+
+        Returns True if expansion was performed (caller should skip normal handling).
+        """
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr in self._SYNC_OP_NAMES
+            and isinstance(func.value, ast.Attribute)
+            and func.value.attr == "system"
+        ):
+            return False
+        # Find event_id kwarg with a subscript value
+        event_id_kw = next(
+            (kw for kw in node.keywords if kw.arg == "event_id" and isinstance(kw.value, ast.Subscript)),
+            None,
+        )
+        if event_id_kw is None:
+            return False
+
+        span = self.span_tracker.get_span(node)
+        subscript = event_id_kw.value
+        assert isinstance(subscript, ast.Subscript)
+
+        # Resolve the tuple of integer constants
+        constants = self._resolve_const_event_id_tuple(subscript.value, span)
+        if constants is None:
+            return False  # fall through to normal handling, which will error on ConvertKwargsDict
+
+        # Parse index expression
+        index_expr = self.parse_expression(subscript.slice)
+
+        # Parse all other kwargs (excluding event_id)
+        other_kwargs: dict[str, Any] = {
+            kw.arg: self._resolve_single_kwarg(kw.arg, kw.value)
+            for kw in node.keywords
+            if kw.arg is not None and kw.arg != "event_id"
+        }
+
+        op_name = func.attr
+        op_func = getattr(ir_op.system, op_name)
+        self._build_sync_event_chain(op_func, other_kwargs, index_expr, constants, 0, span)
+        return True
+
+    def _resolve_const_event_id_tuple(self, node: ast.expr, span: ir.Span) -> list[int] | None:
+        """Return the list of integer constants for a tuple AST node, or None if not resolvable."""
+        # Case 1: literal tuple, e.g. (0, 1)
+        if isinstance(node, ast.Tuple):
+            if all(isinstance(elt, ast.Constant) and isinstance(elt.value, int) for elt in node.elts):
+                return [elt.value for elt in node.elts]  # type: ignore[union-attr]
+        # Case 2: name in constant registry, e.g. event_ids = (0, 1) assigned earlier
+        if isinstance(node, ast.Name) and node.id in self._const_tuple_registry:
+            return self._const_tuple_registry[node.id]
+        return None
+
+    def _build_sync_event_chain(
+        self,
+        op_func: Any,
+        other_kwargs: dict[str, Any],
+        index_expr: ir.Expr,
+        constants: list[int],
+        level: int,
+        span: ir.Span,
+    ) -> None:
+        """Recursively build if-else chain of sync calls with constant event_ids.
+
+        Generates:
+            if index == 0: sync_op(event_id=constants[0])
+            else:
+              if index == 1: sync_op(event_id=constants[1])
+              else: sync_op(event_id=constants[n-1])   # leaf
+        """
+        n = len(constants)
+        if level == n - 1:
+            # Leaf: always emit this variant
+            call_expr = op_func(**other_kwargs, event_id=constants[level], span=span)
+            self.builder.eval_stmt(call_expr, span)
+            return
+
+        cond = index_expr == level
+        with self.builder.if_stmt(cond, span) as if_b:
+            # Then branch
+            call_expr = op_func(**other_kwargs, event_id=constants[level], span=span)
+            self.builder.eval_stmt(call_expr, span)
+            if_b.else_()
+            # Else branch: recurse
+            self._build_sync_event_chain(op_func, other_kwargs, index_expr, constants, level + 1, span)
+            # No return_var — this is a non-value-returning scf.if
+
     def parse_evaluation_statement(self, stmt: ast.Expr) -> None:
         """Parse evaluation statement (EvalStmt).
 
@@ -1261,6 +1379,12 @@ class ASTParser:
         Args:
             stmt: Expr AST node
         """
+        # Special case: system sync ops with subscript event_id are expanded into
+        # an IfStmt chain so each branch can use a compile-time-constant event_id.
+        # This must happen before parse_expression to avoid emitting a phi var.
+        if self._try_expand_sync_op_stmt(stmt.value):
+            return
+
         expr = self.parse_expression(stmt.value)
         span = self.span_tracker.get_span(stmt)
 
@@ -2318,6 +2442,57 @@ class ASTParser:
         elements = [self.parse_expression(elt) for elt in tuple_node.elts]
         return ir.MakeTuple(elements, span)
 
+    def _build_tuple_index_chain(
+        self,
+        value_expr: ir.Expr,
+        index_expr: ir.Expr,
+        elem_type: ir.Type,
+        n: int,
+        level: int,
+        span: ir.Span,
+    ) -> ir.Var | None:
+        """Recursively build nested if-else chain for variable tuple index access.
+
+        Lowers `tuple[idx]` into a nested if-else structure at the IR level:
+          if idx == 0: yield tuple[0]
+          else:
+            if idx == 1: yield tuple[1]
+            else: yield tuple[2]  # leaf
+
+        Args:
+            value_expr: The tuple expression being indexed
+            index_expr: Variable index expression
+            elem_type: Type of each tuple element (must be homogeneous)
+            n: Total number of tuple elements
+            level: Current element index being tested (0-based)
+            span: Source span for IR nodes
+
+        Returns:
+            The phi var from the outermost IfStmt, or None for the leaf case.
+        """
+        if level == n - 1:
+            # Leaf: emit yield unconditionally (already in innermost else branch)
+            self.builder.emit(ir.YieldStmt([ir.TupleGetItemExpr(value_expr, level, span)], span))
+            return None
+
+        cond = index_expr == level  # Expr.__eq__ produces a comparison Expr
+        with self.builder.if_stmt(cond, span) as if_b:
+            # Then branch: yield the element at this level
+            self.builder.emit(ir.YieldStmt([ir.TupleGetItemExpr(value_expr, level, span)], span))
+            if_b.else_()
+            # Else branch: recurse to the next level
+            inner_result = self._build_tuple_index_chain(
+                value_expr, index_expr, elem_type, n, level + 1, span
+            )
+            if inner_result is not None:
+                # Forward the inner phi var as this branch's yield
+                self.builder.emit(ir.YieldStmt([inner_result], span))
+            # Declare phi variable AFTER both branches, still inside the with block
+            result_name = f"_tidx_{self._tuple_idx_counter}"
+            self._tuple_idx_counter += 1
+            if_b.return_var(result_name, elem_type, span)
+        return if_b.output(0)
+
     def parse_subscript(self, subscript: ast.Subscript) -> ir.Expr:
         """Parse subscript expression like tuple[0].
 
@@ -2378,11 +2553,42 @@ class ASTParser:
                     hint="Use integer index like tuple[0]",
                 )
         else:
-            raise UnsupportedFeatureError(
-                "Only constant integer indices supported for tuple access",
-                span=span,
-                hint="Use a constant integer index like tuple[0]",
+            # Variable index: parse as IR expression and lower to an if-else chain
+            index_expr = self.parse_expression(subscript.slice)
+
+            value_type = value_expr.type
+            if not isinstance(value_type, ir.TupleType):
+                raise ParserTypeError(
+                    f"Subscript requires tuple type, got {type(value_type).__name__}",
+                    span=span,
+                    hint="Only tuple types support subscript access in this context",
+                )
+
+            elem_types = list(value_type.types)
+            if not elem_types:
+                raise ParserTypeError(
+                    "Cannot index into empty tuple",
+                    span=span,
+                )
+
+            # Variable indexing requires all elements to share the same type
+            first_type = elem_types[0]
+            for i, t in enumerate(elem_types[1:], 1):
+                if not ir.structural_equal(t, first_type, enable_auto_mapping=False):
+                    raise ParserTypeError(
+                        f"Variable tuple index requires all elements to have the same type, "
+                        f"but element 0 has type {first_type} and element {i} has type {t}",
+                        span=span,
+                        hint="Use a constant index to access elements of different types",
+                    )
+
+            result = self._build_tuple_index_chain(
+                value_expr, index_expr, first_type, len(elem_types), 0, span
             )
+            if result is None:
+                # Single-element tuple: leaf emits directly, return TupleGetItemExpr
+                return ir.TupleGetItemExpr(value_expr, 0, span)
+            return result
 
         # Check if value is tuple type (runtime check)
         value_type = value_expr.type

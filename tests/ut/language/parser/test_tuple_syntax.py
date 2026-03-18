@@ -130,5 +130,74 @@ class TestTupleRoundTrip:
         assert isinstance(func, ir.Function)
 
 
+class TestTupleVariableIndexParsing:
+    """Tests for variable index access on tuples (lowered to if-else chain)."""
+
+    def test_variable_index_homogeneous_tuple(self):
+        """Variable index on a homogeneous tuple generates valid IR."""
+
+        @pl.function
+        def func(x: pl.Scalar[pl.INT64], y: pl.Scalar[pl.INT64], idx: pl.Scalar[pl.INT64]):
+            my_tuple = (x, y)
+            _ = my_tuple[idx]
+
+        assert func is not None
+        assert isinstance(func, ir.Function)
+
+    def test_variable_index_three_elements(self):
+        """Variable index on a 3-element homogeneous tuple."""
+
+        @pl.function
+        def func(
+            a: pl.Scalar[pl.INT64],
+            b: pl.Scalar[pl.INT64],
+            c: pl.Scalar[pl.INT64],
+            idx: pl.Scalar[pl.INT64],
+        ):
+            my_tuple = (a, b, c)
+            _ = my_tuple[idx]
+
+        assert func is not None
+        assert isinstance(func, ir.Function)
+
+    def test_variable_index_result_used_in_expression(self):
+        """Variable index result can be used in subsequent expressions."""
+
+        @pl.function
+        def func(
+            x: pl.Scalar[pl.INT64],
+            y: pl.Scalar[pl.INT64],
+            idx: pl.Scalar[pl.INT64],
+        ):
+            my_tuple = (x, y)
+            val = my_tuple[idx]
+            _ = val + x
+
+        assert func is not None
+        assert isinstance(func, ir.Function)
+
+    def test_variable_index_heterogeneous_tuple_raises(self):
+        """Variable index on heterogeneous tuple raises an error."""
+        with pytest.raises(Exception):
+
+            @pl.function
+            def func(x: pl.Scalar[pl.INT64], y: pl.Scalar[pl.FP32], idx: pl.Scalar[pl.INT64]):
+                my_tuple = (x, y)
+                _ = my_tuple[idx]
+
+    def test_variable_index_ir_contains_if_stmt(self):
+        """Variable index generates IfStmt nodes in the IR."""
+
+        @pl.function
+        def func(x: pl.Scalar[pl.INT64], y: pl.Scalar[pl.INT64], idx: pl.Scalar[pl.INT64]):
+            my_tuple = (x, y)
+            _ = my_tuple[idx]
+
+        assert func is not None
+        body_stmts = func.body.stmts
+        if_stmts = [s for s in body_stmts if isinstance(s, ir.IfStmt)]
+        assert len(if_stmts) >= 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

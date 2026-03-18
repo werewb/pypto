@@ -220,6 +220,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   float_const_names_.clear();
   extra_alloc_tiles_.clear();
   extra_tile_buf_types_.clear();
+  tuple_var_to_make_tuple_.clear();
+  indirect_select_depth_ = 0;
   constants_section_.str("");
   constants_section_.clear();
   body_section_.str("");
@@ -570,6 +572,11 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   }
 
   current_expr_value_ = "";
+  // MakeTuple has no MLIR equivalent — store for TupleGetItemExpr resolution
+  if (auto make_tuple = As<ir::MakeTuple>(op->value_)) {
+    tuple_var_to_make_tuple_[op->var_->name_] = make_tuple;
+    return;
+  }
   VisitExpr(op->value_);
   // mapping arith var name to mlir mapping
   if (!current_expr_value_.empty()) {
@@ -832,6 +839,18 @@ std::string PTOCodegen::GetTileBufTypeStringFromTileType(
 }
 
 std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
+  // Handle TupleGetItemExpr by looking up the underlying tile element directly
+  if (auto tgi = As<ir::TupleGetItemExpr>(expr)) {
+    if (auto tuple_var = As<ir::Var>(tgi->tuple_)) {
+      auto it = tuple_var_to_make_tuple_.find(tuple_var->name_);
+      if (it != tuple_var_to_make_tuple_.end()) {
+        const auto& elems = it->second->elements_;
+        if (tgi->index_ >= 0 && tgi->index_ < static_cast<int>(elems.size())) {
+          return GetExprTypeAnnotation(elems[tgi->index_]);
+        }
+      }
+    }
+  }
   if (auto var = As<ir::Var>(expr)) {
     // Check if variable was remapped to a dynamically-allocated tile buffer (e.g., reshape output)
     auto mlir_it = var_to_mlir_.find(var->name_);
@@ -958,6 +977,21 @@ void PTOCodegen::VisitCmpExpr(const BinaryExprPtr& op, const std::string& predic
 
 void PTOCodegen::VisitExpr_(const ir::VarPtr& op) { current_expr_value_ = GetVarName(op); }
 
+void PTOCodegen::VisitExpr_(const ir::TupleGetItemExprPtr& op) {
+  if (auto tuple_var = As<ir::Var>(op->tuple_)) {
+    auto it = tuple_var_to_make_tuple_.find(tuple_var->name_);
+    if (it != tuple_var_to_make_tuple_.end()) {
+      const auto& elems = it->second->elements_;
+      if (op->index_ >= 0 && op->index_ < static_cast<int>(elems.size())) {
+        VisitExpr(elems[op->index_]);  // visits tile_a/tile_b directly
+        return;
+      }
+    }
+  }
+  // Fallback: visit the tuple expression
+  VisitExpr(op->tuple_);
+}
+
 void PTOCodegen::VisitExpr_(const ir::IterArgPtr& op) {
   current_expr_value_ = GetVarName(std::dynamic_pointer_cast<const ir::Var>(op));
 }
@@ -1042,9 +1076,26 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
   std::vector<std::string> yielded_values;
   for (const auto& expr : op->value_) {
     VisitExpr(expr);
-    yielded_values.push_back(current_expr_value_);
+    std::string val = current_expr_value_;
     current_expr_value_ = "";
+
+    if (indirect_select_depth_ > 0) {
+      if (auto tile_type = As<TileType>(expr->GetType())) {
+        // Yield i64 addr instead of tile_buf for TileType in indirect-select scf.if
+        std::string addr_operand;
+        if (tile_type->memref_.has_value() && tile_type->memref_.value()->addr_) {
+          if (auto ca = As<ir::ConstInt>(tile_type->memref_.value()->addr_)) {
+            addr_operand = GetOrEmitI64Constant(ca->value_);
+          }
+        }
+        if (addr_operand.empty()) addr_operand = GetOrEmitI64Constant(0);
+        val = addr_operand;
+        // Future: TensorType → yield ptr via similar pattern
+      }
+    }
+    yielded_values.push_back(val);
   }
+
   yield_buffer_ = yielded_values;
 }
 
@@ -1101,21 +1152,33 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     // scf.if with return values
     std::vector<std::string> return_var_names;
     std::vector<std::string> return_var_types;
+    std::vector<bool> needs_indirect_yield;  // per-return-var flag
+
     for (const auto& return_var : op->return_vars_) {
       std::string ret_name = NewTemp();
       var_to_mlir_[return_var->name_] = ret_name;
       return_var_names.push_back(ret_name);
       // Default to index for scalar types
       std::string type_str = "index";
+      bool indirect_yield = false;
       if (auto scalar_type = As<ScalarType>(return_var->GetType())) {
         if (scalar_type->dtype_ == DataType::BOOL) {
           type_str = "i1";
         } else if (scalar_type->dtype_.IsFloat()) {
           type_str = GetTypeString(scalar_type->dtype_);
         }
+      } else if (As<TileType>(return_var->GetType())) {
+        // TileType: scf.if yields i64 addr; pto.alloc_tile reconstructs tile_buf after scf.if.
+        // NOTE: Add TensorType here in future (yields ptr, reconstructs via make_tensor_view).
+        type_str = "i64";
+        indirect_yield = true;
       }
       return_var_types.push_back(type_str);
+      needs_indirect_yield.push_back(indirect_yield);
     }
+
+    bool any_indirect_yield = std::any_of(needs_indirect_yield.begin(), needs_indirect_yield.end(),
+                                          [](bool b) { return b; });
 
     CHECK(op->else_body_.has_value()) << "IfStmt with return_vars requires else_body";
 
@@ -1133,6 +1196,9 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     oss << ") {";
     Emit(oss.str());
     indent_level_++;
+
+    // Enter indirect-select mode if any return var needs indirect yield
+    if (any_indirect_yield) indirect_select_depth_++;
 
     // Then branch
     yield_buffer_.clear();
@@ -1183,6 +1249,28 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       indent_level_--;
     }
     Emit("}");
+
+    // Exit indirect-select mode
+    if (any_indirect_yield) indirect_select_depth_--;
+
+    // For each indirect-yield return var, reconstruct the real object from the scalar returned by scf.if
+    for (size_t rv_idx = 0; rv_idx < op->return_vars_.size(); ++rv_idx) {
+      if (!needs_indirect_yield[rv_idx]) continue;
+      const auto& return_var = op->return_vars_[rv_idx];
+      if (auto tile_type = As<TileType>(return_var->GetType())) {
+        // TileType: reconstruct tile_buf from the i64 addr returned by scf.if
+        std::string tile_buf_type = GetTileBufTypeStringFromTileType(tile_type);
+        std::string addr_ssa = return_var_names[rv_idx];
+        std::string tile_name = NewTemp();
+        Emit(tile_name + " = pto.alloc_tile addr = " + addr_ssa + " : " + tile_buf_type);
+        var_to_mlir_[return_var->name_] = tile_name;
+        extra_tile_buf_types_[tile_name] = tile_buf_type;
+        // Future: } else if (auto tensor_type = As<TensorType>(return_var->GetType())) { ... }
+      } else {
+        INTERNAL_CHECK(false) << "Internal error: unsupported type for indirect-select return var: "
+                              << return_var->name_;
+      }
+    }
   }
 }
 
