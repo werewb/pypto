@@ -59,8 +59,10 @@ class TileType:
         target_memory: Memory space for the tile (default Vec).
         valid_shape: Valid shape dimensions (optional).
         blayout: Block layout (0=none_box, 1=row_major, 2=col_major, optional).
+            Auto-filled per memory space if omitted.
         slayout: Scatter layout (0=none_box, 1=row_major, 2=col_major, optional).
-        fractal: Fractal size (optional).
+            Auto-filled per memory space if omitted.
+        fractal: Fractal size (optional). Auto-filled: 512 for FP16, 1024 for FP32 ACC.
         pad: Pad mode (0=null, 1=zero, 2=max, 3=min, optional).
     """
     shape: Sequence[int] | _ir_core.MakeTuple
@@ -71,6 +73,66 @@ class TileType:
     slayout: Optional[int] = None
     fractal: Optional[int] = None
     pad: Optional[int] = None
+
+    def __post_init__(self):
+        _apply_default_layout(self)
+
+
+# Hardware-required layouts per memory space for Cube matmul.
+# {MemorySpace: (blayout, slayout)}
+_REQUIRED_LAYOUTS: dict[MemorySpace, tuple[int, int]] = {
+    MemorySpace.Mat:   (2, 1),  # NZ format: col_major block, row_major scatter (default)
+    MemorySpace.Left:  (1, 1),  # row_major block, row_major scatter
+    MemorySpace.Right: (1, 2),  # row_major block, col_major scatter
+    MemorySpace.Acc:   (2, 1),  # NZ format: col_major block, row_major scatter
+}
+
+# MAT also supports DN layout (row_major block, col_major scatter) for DN TLOAD.
+_MAT_DN_LAYOUT: tuple[int, int] = (1, 2)
+
+_LAYOUT_NAMES = {0: "none_box", 1: "row_major", 2: "col_major"}
+
+
+def _apply_default_layout(tt: "TileType") -> None:
+    """Auto-fill and validate blayout/slayout/fractal for Cube memory spaces."""
+    required = _REQUIRED_LAYOUTS.get(tt.target_memory)
+    if required is None:
+        return  # Vec or other spaces: no constraints
+
+    req_b, req_s = required
+    space_name = tt.target_memory.name
+
+    # Auto-fill if not specified
+    if tt.blayout is None:
+        tt.blayout = req_b
+    if tt.slayout is None:
+        tt.slayout = req_s
+
+    # Validate against hardware requirements
+    actual = (tt.blayout, tt.slayout)
+    if tt.target_memory == MemorySpace.Mat:
+        # MAT supports both ND (2,1) and DN (1,2) layouts
+        if actual != required and actual != _MAT_DN_LAYOUT:
+            raise ValueError(
+                f"{space_name} tiles require blayout/slayout={required} (ND) or "
+                f"{_MAT_DN_LAYOUT} (DN), got ({tt.blayout}, {tt.slayout})"
+            )
+    else:
+        if tt.blayout != req_b:
+            raise ValueError(
+                f"{space_name} tiles require blayout={req_b} ({_LAYOUT_NAMES[req_b]}), "
+                f"got blayout={tt.blayout} ({_LAYOUT_NAMES.get(tt.blayout, '?')})"
+            )
+        if tt.slayout != req_s:
+            raise ValueError(
+                f"{space_name} tiles require slayout={req_s} ({_LAYOUT_NAMES[req_s]}), "
+                f"got slayout={tt.slayout} ({_LAYOUT_NAMES.get(tt.slayout, '?')})"
+            )
+
+    # Auto-fill fractal for FP32 ACC
+    if tt.target_memory == MemorySpace.Acc and tt.fractal is None:
+        if tt.dtype in (DataType.FP32, DataType.INT32):
+            tt.fractal = 1024
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -128,11 +190,36 @@ def make_tile(
 # Memory operations
 # ---------------------------------------------------------------------------
 
+def _check_nd_load_bounds(out: "Tile", tensor: "Tensor") -> None:
+    """Validate that tile dims do not exceed tensor dims for ND loads.
+
+    Compares static (ConstInt) shape dimensions between the tile and tensor.
+    Raises ValueError if a tile dimension exceeds the corresponding tensor
+    dimension, which would cause an out-of-bounds partition_view.
+    """
+    tile_type = out.unwrap().type
+    tensor_type = tensor.unwrap().type
+    tile_shape = getattr(tile_type, "shape", None)
+    tensor_shape = getattr(tensor_type, "shape", None)
+    if tile_shape is None or tensor_shape is None:
+        return
+    for d, (t_dim, s_dim) in enumerate(zip(tile_shape, tensor_shape)):
+        t_val = getattr(t_dim, "value", None)
+        s_val = getattr(s_dim, "value", None)
+        if t_val is not None and s_val is not None and t_val > s_val:
+            raise ValueError(
+                f"manual.load: tile dimension {d} ({t_val}) exceeds tensor "
+                f"dimension ({s_val}). If the tensor needs transposing, "
+                f'use layout="dn".'
+            )
+
+
 def load(
     out: Tile,
     tensor: Tensor,
     offsets: Sequence[int | Expr],
     shapes: Sequence[int | Expr] | None = None,
+    layout: str | None = None,
 ) -> None:
     """Load data from a global tensor into a pre-allocated tile.
 
@@ -143,12 +230,20 @@ def load(
         shapes: Number of elements to load in each dimension. When omitted,
             no ``pto.set_validshape`` instruction is emitted and the full
             tile allocation size is used.
+        layout: Tensor memory layout. ``"dn"`` for column-major (DN) layout,
+            which lets TLOAD transpose on-chip. Default is row-major (ND).
     """
+    if layout != "dn":
+        _check_nd_load_bounds(out, tensor)
     shapes_tuple = _ir_core.MakeTuple([], _span()) if shapes is None else _to_make_tuple(shapes)
+    kwargs: dict = {}
+    if layout is not None:
+        kwargs["layout"] = layout
     _op(
         "manual.load",
         [tensor.unwrap(), _to_make_tuple(offsets), shapes_tuple],
-        out
+        out,
+        **kwargs,
     )
 
 
@@ -241,16 +336,17 @@ def l0c_store(
     return Tensor(expr=_ir_block_ops.l0c_store(tile.unwrap(), offsets, shapes, output_tensor.unwrap()))
 
 
-def move(tile: Tile, target_memory: MemorySpace, out: Tile, transpose: bool = False) -> None:
+def move(out: Tile, tile: Tile) -> None:
     """Move a tile between memory levels, writing into a pre-allocated buffer.
 
+    The TMOV variant (M2L, M2B, etc.) is determined by the output tile's
+    memory space, which was set during make_tile().
+
     Args:
-        tile: Source tile.
-        target_memory: Destination memory space.
         out: Pre-allocated output tile; rebound on return.
-        transpose: Whether to transpose while moving.
+        tile: Source tile.
     """
-    _op("manual.move", [tile.unwrap()], out, target_memory=target_memory, transpose=transpose)
+    _op("manual.move", [tile.unwrap()], out)
 
 
 def ub_copy(tile: Tile, out: Tile) -> None:

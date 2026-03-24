@@ -124,8 +124,8 @@ def dynamic_matmul_db_kernel(
                     pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=event_ids[buf_idx])
                     pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=event_ids[buf_idx])
 
-                    plm.move(tile_a_buf[buf_idx], tile_a_load_buf[buf_idx], target_memory=pl.MemorySpace.Left)
-                    plm.move(tile_b_buf[buf_idx], tile_b_load_buf[buf_idx], target_memory=pl.MemorySpace.Right)
+                    plm.move(tile_a_buf[buf_idx], tile_a_load_buf[buf_idx])
+                    plm.move(tile_b_buf[buf_idx], tile_b_load_buf[buf_idx])
 
                     # (MTE1, M) — move done, matmul can start
                     pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=event_ids[buf_idx])
@@ -153,7 +153,7 @@ def dynamic_matmul_db_kernel(
 
 @fe.jit()
 def test_dynamic_matmul_db():
-    compiled_lib = fe.compile(dynamic_matmul_db_kernel, arch="dav-c220-cube")
+    compiled_lib = fe.compile(dynamic_matmul_db_kernel, arch="a3")
     print("compiled lib path:", compiled_lib.lib_path)
 
     device = "npu:1"
@@ -181,11 +181,11 @@ def test_dynamic_matmul_db():
 
         print("***********npu output***********")
         print(c.shape, c.dtype)
-        print(c)
+        # print(c)
         c_ref = torch.matmul(a.float(), b.float())
         print("***********golden output***********")
         print(c_ref.shape, c_ref.dtype)
-        print(c_ref)
+        # print(c_ref)
 
         torch.testing.assert_close(c, c_ref, rtol=1e-2, atol=1e-2)
         print("result equal!")

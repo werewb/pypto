@@ -247,8 +247,8 @@ def flash_attention_kernel(
                     pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
                     pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
 
-                    plm.move(q_left, q_mat, target_memory=pl.MemorySpace.Left)
-                    plm.move(k_right, k_mat, target_memory=pl.MemorySpace.Right)
+                    plm.move(q_left, q_mat)
+                    plm.move(k_right, k_mat)
 
                     pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
                     pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
@@ -365,8 +365,8 @@ def flash_attention_kernel(
                 pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
                 pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
 
-                plm.move(p_left, p_mat, target_memory=pl.MemorySpace.Left)
-                plm.move(v_right, v_mat, target_memory=pl.MemorySpace.Right)
+                plm.move(p_left, p_mat)
+                plm.move(v_right, v_mat)
 
                 pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
                 pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=1)
@@ -425,7 +425,7 @@ def test_flash_attention_multicore():
         )
 
     log("stage 0: compile")
-    compiled_lib = fe.compile(flash_attention_kernel, arch="dav-c220")
+    compiled_lib = fe.compile(flash_attention_kernel, arch="a3")
     print("compiled lib path:", compiled_lib.lib_path, flush=True)
 
     device = "npu:7"
