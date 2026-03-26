@@ -79,6 +79,17 @@ def _arch_needs_same_pipe_sync(npu_arch: str | None) -> bool:
     return "dav-2201" in arch or arch in ("a2", "a3")
 
 
+class _StructVar:
+    """Compile-time grouping of IR expressions, accessed via attribute syntax.
+
+    Created by ``pl.struct(field1=val1, field2=val2, ...)``.
+    """
+
+    def __init__(self, fields: dict[str, Any], name: str = "") -> None:
+        self.fields = fields
+        self.name = name
+
+
 class ASTParser:
     """Parses Python AST and builds IR using IRBuilder."""
 
@@ -440,6 +451,11 @@ class ASTParser:
                         tile_type = self._parse_tile_type_call(stmt.value)
                         self.scope_manager.define_python_var(var_name, tile_type, span=span)
                         return
+                    # pl.struct(field1=val1, field2=val2, ...)
+                    if isinstance(func, ast.Attribute) and func.attr == "struct":
+                        struct_var = self._parse_struct_call(stmt.value, var_name)
+                        self.scope_manager.define_python_var(var_name, struct_var, span=span)
+                        return
                 # Check if this is a yield assignment: var = pl.yield_(...)
                 if isinstance(stmt.value, ast.Call):
                     func = stmt.value.func
@@ -474,6 +490,12 @@ class ASTParser:
                         return
 
                 value_expr = self.parse_expression(stmt.value)
+                if value_expr is None:
+                    raise ParserTypeError(
+                        f"Cannot assign void inline function result to '{var_name}'",
+                        span=span,
+                        hint="Inline functions used as expressions must return a value",
+                    )
                 var = self.builder.let(var_name, value_expr, span=span)
                 self.scope_manager.define_var(var_name, var, span=span)
 
@@ -490,6 +512,32 @@ class ASTParser:
                 ):
                     self._const_tuple_registry[var_name] = [elt.value for elt in stmt.value.elts]  # type: ignore[union-attr]
                 return
+
+            # Handle struct field assignment: ctx.field = value
+            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                obj_name = target.value.id
+                field_name = target.attr
+                span = self.span_tracker.get_span(stmt)
+
+                obj = self.scope_manager.get_python_var(obj_name)
+                if obj is None:
+                    obj = self.scope_manager.lookup_var(obj_name)
+                if isinstance(obj, _StructVar):
+                    if field_name not in obj.fields:
+                        raise ParserTypeError(
+                            f"Struct '{obj_name}' has no field '{field_name}'",
+                            span=span,
+                            hint=f"Available fields: {', '.join(obj.fields.keys())}",
+                        )
+                    value_expr = self.parse_expression(stmt.value)
+                    # Emit IR variable reassignment so codegen sees it
+                    if isinstance(value_expr, ir.Expr):
+                        ir_name = f"_{obj.name}_{field_name}" if obj.name else field_name
+                        var = self.builder.let(ir_name, value_expr, span=span)
+                        obj.fields[field_name] = var
+                    else:
+                        obj.fields[field_name] = value_expr
+                    return
 
         raise ParserSyntaxError(
             f"Unsupported assignment: {ast.unparse(stmt)}",
@@ -1475,6 +1523,10 @@ class ASTParser:
         expr = self.parse_expression(stmt.value)
         span = self.span_tracker.get_span(stmt)
 
+        # Void inline functions return None — nothing to emit
+        if expr is None:
+            return
+
         # Validate that we got an IR expression (not a list literal, etc.)
         if not isinstance(expr, ir.Expr):
             raise ParserSyntaxError(
@@ -1916,7 +1968,7 @@ class ASTParser:
             and isinstance(stmt.value.value, str)
         )
 
-    def _parse_inline_call(self, _local_name: str, inline_func: "InlineFunction", call: ast.Call) -> ir.Expr:
+    def _parse_inline_call(self, _local_name: str, inline_func: "InlineFunction", call: ast.Call) -> ir.Expr | None:
         """Parse a call to an InlineFunction, expanding its body in-place.
 
         Args:
@@ -1980,13 +2032,6 @@ class ASTParser:
             # Leak vars so inlined definitions are visible to the caller
             self.scope_manager.exit_scope(leak_vars=True)
 
-        if return_expr is None:
-            raise ParserTypeError(
-                f"Inline function '{inline_func.name}' has no return value",
-                span=span,
-                hint="Inline functions used as expressions must return a value",
-            )
-
         return return_expr
 
     @staticmethod
@@ -2001,7 +2046,7 @@ class ASTParser:
                     span=span,
                 )
 
-    def _auto_inline_call(self, func_name: str, fn: Callable, call: ast.Call) -> ir.Expr:
+    def _auto_inline_call(self, func_name: str, fn: Callable, call: ast.Call) -> ir.Expr | None:
         """Inline an unannotated plain Python function at the call site.
 
         The function body is expanded in-place (like @pl.inline). Nested bare-name
@@ -2219,6 +2264,50 @@ class ASTParser:
             kwargs[kw.arg] = self._resolve_single_kwarg(kw.arg, kw.value)
 
         return TileType(**kwargs)
+
+    def _parse_struct_call(self, call: ast.Call, struct_name: str = "") -> _StructVar:
+        """Parse pl.struct(field1=val1, field2=val2, ...) into a _StructVar.
+
+        Each field is emitted as an IR variable via ``builder.let`` so that
+        subsequent mutations produce proper IR ``AssignStmt`` nodes.  This is
+        critical for loop-carried variables: the codegen must see the
+        reassignment inside the loop body to generate correct MLIR.
+
+        IR variable names are prefixed with ``_{struct_name}_`` to avoid
+        collisions with standalone variables of the same name in other scopes
+        (e.g. cube vs. vector section both using ``q_count``).
+
+        Args:
+            call: The AST Call node for pl.struct(...)
+            struct_name: LHS variable name (e.g. "ctx") used to prefix IR names
+
+        Returns:
+            _StructVar with fields mapping to IR Vars
+        """
+        span = self.span_tracker.get_span(call)
+        if call.args:
+            raise ParserSyntaxError(
+                "pl.struct() only accepts keyword arguments",
+                span=span,
+                hint="Use pl.struct(name1=val1, name2=val2, ...)",
+            )
+        fields: dict[str, Any] = {}
+        for kw in call.keywords:
+            if kw.arg is None:
+                raise ParserSyntaxError(
+                    "pl.struct() does not support **kwargs",
+                    span=span,
+                )
+            value_expr = self.parse_expression(kw.value)
+            # Emit IR variable so codegen can track reassignments
+            if isinstance(value_expr, ir.Expr):
+                ir_name = f"_{struct_name}_{kw.arg}" if struct_name else kw.arg
+                var = self.builder.let(ir_name, value_expr, span=span)
+                fields[kw.arg] = var
+            else:
+                # Non-IR values (tuples, Python objects) stay as-is
+                fields[kw.arg] = value_expr
+        return _StructVar(fields, name=struct_name)
 
     def _parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.
@@ -2896,6 +2985,19 @@ class ASTParser:
         if isinstance(attr.value, ast.Name):
             obj_name = attr.value.id
             field_name = attr.attr
+
+            # Check struct vars (python var or regular scope var)
+            obj = self.scope_manager.get_python_var(obj_name)
+            if obj is None:
+                obj = self.scope_manager.lookup_var(obj_name)
+            if isinstance(obj, _StructVar):
+                if field_name not in obj.fields:
+                    raise ParserTypeError(
+                        f"Struct '{obj_name}' has no field '{field_name}'",
+                        span=span,
+                        hint=f"Available fields: {', '.join(obj.fields.keys())}",
+                    )
+                return obj.fields[field_name]
             if obj_name in self.tiling_registry:
                 field_vars = self.tiling_registry[obj_name]
                 if field_name in field_vars:

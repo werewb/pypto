@@ -83,6 +83,8 @@ VA7 = VA6 + VB_RED            # running_o   [64, 128] FP32
 VA8 = VA7 + VB4               # pv_vec      [64, 128] FP32
 VA9 = VA8 + VB4               # o_f16       [64, 128] FP16
 # Total: VA9 + VB2 = 122880 bytes = 120 KB < 192 KB ✓
+event_ids_01 = (0, 1)
+event_ids_23= (2, 3)
 
 # Cross-core sync event IDs
 QK_READY = 0
@@ -150,6 +152,70 @@ def alloc_cube_buffer():
     return q_mat_buf, k_mat_buf, p_mat_buf, v_mat_buf, left_buf, right_buf, acc_buf
 
 
+def matmul1(ctx):
+    q_mat_idx = ctx.q_count % 2
+    skv_off = ctx.skvi * TKV
+
+    pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=event_ids_01[ctx.buf_idx])
+    if ctx.skvi == 0:
+        plm.load(q_mat_buf[q_mat_idx], q, [ctx.sq_off, 0])
+
+    # QK phase — double-buffered K load
+    plm.load(k_mat_buf[ctx.buf_idx], k, [skv_off, 0], layout="dn")
+    pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
+    pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
+
+    pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE1, event_id=event_ids_01[ctx.l0ab_idx])
+    plm.move(left_buf[ctx.l0ab_idx], q_mat_buf[q_mat_idx])
+    plm.move(right_buf[ctx.l0ab_idx], k_mat_buf[ctx.buf_idx])
+    pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)
+    pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)
+    pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=event_ids_01[ctx.buf_idx])
+
+    pl.system.sync_dst(set_pipe=pl.PipeType.FIX, wait_pipe=pl.PipeType.M, event_id=event_ids_01[ctx.l0c_idx])
+    plm.matmul(acc_buf[ctx.l0c_idx], left_buf[ctx.l0ab_idx], right_buf[ctx.l0ab_idx])
+    pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
+    pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
+    pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE1, event_id=event_ids_01[ctx.l0ab_idx])
+    plm.l0c_store(acc_buf[ctx.l0c_idx], [ctx.sq_off, skv_off], [TS, TKV], qk_buf)
+    pl.system.sync_src(set_pipe=pl.PipeType.FIX, wait_pipe=pl.PipeType.M, event_id=event_ids_01[ctx.l0c_idx])
+    ctx.l0ab_idx = 1 - ctx.l0ab_idx
+    ctx.l0c_idx = 1 - ctx.l0c_idx
+    pl.system.set_cross_core(pipe=pl.PipeType.FIX, event_id=QK_READY)
+    return
+
+
+def matmul2(ctx):
+    q_mat_idx = ctx.q_count % 2
+    sv_off = ctx.skvi * TKV
+    pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=event_ids_23[ctx.buf_idx])
+    plm.load(v_mat_buf[ctx.buf_idx], v, [sv_off, 0])
+    pl.system.wait_cross_core(pipe=pl.PipeType.M, event_id=P_READY)
+    plm.load(p_mat_buf[ctx.buf_idx], p_buf, [ctx.sq_off, sv_off])
+    pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
+    pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
+
+    pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE1, event_id=event_ids_01[ctx.l0ab_idx])
+    plm.move(left_buf[ctx.l0ab_idx], p_mat_buf[ctx.buf_idx])
+    plm.move(right_buf[ctx.l0ab_idx], v_mat_buf[ctx.buf_idx])
+    pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=event_ids_23[ctx.buf_idx])
+
+    pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)
+    pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)
+    pl.system.sync_dst(set_pipe=pl.PipeType.FIX, wait_pipe=pl.PipeType.M, event_id=event_ids_01[ctx.l0c_idx])
+    plm.matmul(acc_buf[ctx.l0c_idx], left_buf[ctx.l0ab_idx], right_buf[ctx.l0ab_idx])
+    pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
+    pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
+
+    pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE1, event_id=event_ids_01[ctx.l0ab_idx])
+    plm.l0c_store(acc_buf[ctx.l0c_idx], [ctx.core_id * PV_CORE_STRIDE + q_mat_idx * TS, 0], [TS, TD], pv_buf)
+    pl.system.sync_src(set_pipe=pl.PipeType.FIX, wait_pipe=pl.PipeType.M, event_id=event_ids_01[ctx.l0c_idx])
+    ctx.l0ab_idx = 1 - ctx.l0ab_idx
+    ctx.l0c_idx = 1 - ctx.l0c_idx
+    pl.system.set_cross_core(pipe=pl.PipeType.FIX, event_id=PV_READY)
+    return
+
+
 @fe.kernel
 def fa_k_kernel(
     q: pl.Tensor[[Sq2, D2], pl.FP16],
@@ -172,8 +238,7 @@ def fa_k_kernel(
         # MAT tiles — double buffer for K (ping/pong)
         q_mat_buf, k_mat_buf, p_mat_buf, v_mat_buf, left_buf, right_buf, acc_buf = alloc_cube_buffer()
         # Double buffer event IDs: ping=0, pong=1
-        event_ids_01 = (0, 1)
-        event_ids_23= (2, 3)
+
         pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=0) # qk0
         pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=1) # qk1
         pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=2) # v0
@@ -185,73 +250,19 @@ def fa_k_kernel(
         pl.system.sync_src(set_pipe=pl.PipeType.FIX, wait_pipe=pl.PipeType.M, event_id=0)
         pl.system.sync_src(set_pipe=pl.PipeType.FIX, wait_pipe=pl.PipeType.M, event_id=1)
         # Q tile loop: each core processes Q tiles in strided fashion
-        q_count = 0
-        l0ab_idx = 0
-        l0c_idx = 0
+        ctx = pl.struct(sq_off=0, skvi=0, q_count=0, buf_idx=0, l0ab_idx=0, l0c_idx=0, core_id=core_id)
         for qi in pl.range(core_id, sq_tiles, num_cores):
-            sq_off = qi * TS
-            q_mat_idx = q_count % 2
             # ---- Remaining KV tiles with double buffer for k_mat ----
-            for j in pl.range(0, skv_tiles):
-                buf_idx = (q_count * skv_tiles + j) % 2
-                skv_off = j * TKV
-
-                # Load Q for this tile
-                pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=event_ids_01[buf_idx])
-                if j == 0:
-                    plm.load(q_mat_buf[q_mat_idx], q, [sq_off, 0])
-
-                # QK phase — double-buffered K load
-                plm.load(k_mat_buf[buf_idx], k, [skv_off, 0], layout="dn")
-                pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
-
-                pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE1, event_id=event_ids_01[l0ab_idx])
-                plm.move(left_buf[l0ab_idx], q_mat_buf[q_mat_idx])
-                plm.move(right_buf[l0ab_idx], k_mat_buf[buf_idx])
-                pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)
-                pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=event_ids_01[buf_idx])
-
-                pl.system.sync_dst(set_pipe=pl.PipeType.FIX, wait_pipe=pl.PipeType.M, event_id=event_ids_01[l0c_idx])
-                plm.matmul(acc_buf[l0c_idx], left_buf[l0ab_idx], right_buf[l0ab_idx])
-                pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
-                pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE1, event_id=event_ids_01[l0ab_idx])
-                plm.l0c_store(acc_buf[l0c_idx], [sq_off, skv_off], [TS, TKV], qk_buf)
-                pl.system.sync_src(set_pipe=pl.PipeType.FIX, wait_pipe=pl.PipeType.M, event_id=event_ids_01[l0c_idx])
-                pl.system.set_cross_core(pipe=pl.PipeType.FIX, event_id=QK_READY)
-                l0ab_idx = 1 - l0ab_idx
-                l0c_idx = 1 - l0c_idx
+            for skvi in pl.range(0, skv_tiles):
+                ctx.sq_off = qi * TS
+                ctx.skvi = skvi
+                ctx.buf_idx = (ctx.q_count * skv_tiles + skvi) % 2
+                matmul1(ctx)
 
                 # PV phase
-                buf_idx_pv = (q_count * skv_tiles + j) % 2
-                pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=event_ids_23[buf_idx])
-                plm.load(v_mat_buf[buf_idx], v, [skv_off, 0])
-                pl.system.wait_cross_core(pipe=pl.PipeType.M, event_id=P_READY)
-                plm.load(p_mat_buf[buf_idx], p_buf, [sq_off, skv_off])
-                pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
+                matmul2(ctx)
 
-                pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE1, event_id=event_ids_01[l0ab_idx])
-                plm.move(left_buf[l0ab_idx], p_mat_buf[buf_idx])
-                plm.move(right_buf[l0ab_idx], v_mat_buf[buf_idx])
-                pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=event_ids_23[buf_idx])
-
-                pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.FIX, wait_pipe=pl.PipeType.M, event_id=event_ids_01[l0c_idx])
-                plm.matmul(acc_buf[l0c_idx], left_buf[l0ab_idx], right_buf[l0ab_idx])
-                pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
-                pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
-
-                pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE1, event_id=event_ids_01[l0ab_idx])
-                plm.l0c_store(acc_buf[l0c_idx], [core_id * PV_CORE_STRIDE + q_mat_idx * TS, 0], [TS, TD], pv_buf)
-                pl.system.sync_src(set_pipe=pl.PipeType.FIX, wait_pipe=pl.PipeType.M, event_id=event_ids_01[l0c_idx])
-                l0ab_idx = 1 - l0ab_idx
-                l0c_idx = 1 - l0c_idx
-                pl.system.set_cross_core(pipe=pl.PipeType.FIX, event_id=PV_READY)
-            q_count = q_count + 1
+            ctx.q_count = ctx.q_count + 1
         pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=0) # qk0
         pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=1) # qk1
         pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=2) # qk1
@@ -296,7 +307,7 @@ def fa_k_kernel(
         for qi in pl.range(core_id, sq_tiles, num_cores):
             sq_off = qi * TS
             q_mat_idx = q_count % 2
-            # ---- First KV (j=0): FlashSoftmax INIT ----
+            # ---- First KV (ki=0): FlashSoftmax INIT ----
             pl.system.wait_cross_core(pipe=pl.PipeType.V, event_id=QK_READY)
             plm.load(qk_vec, qk_buf, [sq_off + row_off, 0])
             pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
@@ -322,9 +333,9 @@ def fa_k_kernel(
             pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
             pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
 
-            # ---- Remaining KV (j=1..skv_tiles-1): FlashSoftmax UPDATE ----
-            for j in pl.range(1, skv_tiles):
-                skv_off = j * TKV
+            # ---- Remaining KV (ki=1..skv_tiles-1): FlashSoftmax UPDATE ----
+            for ki in pl.range(1, skv_tiles):
+                skv_off = ki * TKV
                 pl.system.wait_cross_core(pipe=pl.PipeType.V, event_id=QK_READY)
                 plm.load(qk_vec, qk_buf, [sq_off + row_off, skv_off])
                 pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
