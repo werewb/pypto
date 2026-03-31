@@ -2700,6 +2700,8 @@ class ASTParser:
                     kwargs.setdefault("fractal", tile_type.fractal)
                 if tile_type.pad is not None:
                     kwargs.setdefault("pad", tile_type.pad)
+                if tile_type.compact is not None:
+                    kwargs.setdefault("compact", tile_type.compact)
                 # Remove TileType from args, keep addr and size
                 args = args[1:]
 
