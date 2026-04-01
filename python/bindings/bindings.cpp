@@ -18,15 +18,15 @@
  * to create the complete Python API.
  */
 
-#include <nanobind/nanobind.h>
+#include <pybind11/pybind11.h>
 
 #include "./module.h"
 #include "pypto/core/common.h"
 
-namespace nb = nanobind;
+namespace py = pybind11;
 
-NB_MODULE(pypto_core, m) {
-  m.doc() = PYPTO_NANOBIND_MODULE_DOC;
+PYBIND11_MODULE(pypto_core, m) {
+  m.doc() = PYPTO_MODULE_DOC;
 
   // Register error handling bindings
   pypto::python::BindErrors(m);

@@ -17,8 +17,8 @@
  * in production code. It is exposed as pypto.testing in Python.
  */
 
-#include <nanobind/nanobind.h>
-#include <nanobind/stl/string.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 #include <cassert>
 #include <string>
@@ -26,7 +26,7 @@
 #include "../module.h"
 #include "pypto/core/error.h"
 
-namespace nb = nanobind;
+namespace py = pybind11;
 
 namespace pypto {
 namespace python {
@@ -89,34 +89,34 @@ namespace python {
 // Module binding
 // ============================================================================
 
-void BindTesting(nb::module_& m) {
+void BindTesting(py::module_& m) {
   // Create a protected submodule for testing utilities
   // This will be accessible as pypto.testing in Python
-  nb::module_ testing = m.def_submodule("testing", "Internal testing utilities (do not use in production)");
+  py::module_ testing = m.def_submodule("testing", "Internal testing utilities (do not use in production)");
 
   // Register error-raising helper functions
-  testing.def("raise_value_error", &raise_value_error, nb::arg("message"),
+  testing.def("raise_value_error", &raise_value_error, py::arg("message"),
               "Raise a ValueError from C++ for testing error handling");
 
-  testing.def("raise_type_error", &raise_type_error, nb::arg("message"),
+  testing.def("raise_type_error", &raise_type_error, py::arg("message"),
               "Raise a TypeError from C++ for testing error handling");
 
-  testing.def("raise_runtime_error", &raise_runtime_error, nb::arg("message"),
+  testing.def("raise_runtime_error", &raise_runtime_error, py::arg("message"),
               "Raise a RuntimeError from C++ for testing error handling");
 
-  testing.def("raise_not_implemented_error", &raise_not_implemented_error, nb::arg("message"),
+  testing.def("raise_not_implemented_error", &raise_not_implemented_error, py::arg("message"),
               "Raise a NotImplementedError from C++ for testing error handling");
 
-  testing.def("raise_index_error", &raise_index_error, nb::arg("message"),
+  testing.def("raise_index_error", &raise_index_error, py::arg("message"),
               "Raise an IndexError from C++ for testing error handling");
 
-  testing.def("raise_generic_error", &raise_generic_error, nb::arg("message"),
+  testing.def("raise_generic_error", &raise_generic_error, py::arg("message"),
               "Raise a generic Error from C++ for testing error handling");
 
-  testing.def("raise_assertion_error", &raise_assertion_error, nb::arg("message"),
+  testing.def("raise_assertion_error", &raise_assertion_error, py::arg("message"),
               "Raise an AssertionError from C++ for testing error handling");
 
-  testing.def("raise_internal_error", &raise_internal_error, nb::arg("message"),
+  testing.def("raise_internal_error", &raise_internal_error, py::arg("message"),
               "Raise an InternalError from C++ for testing error handling");
 }
 

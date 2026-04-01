@@ -11,11 +11,8 @@
 
 #include "pypto/backend/common/backend.h"
 
-#include <nanobind/nanobind.h>
-#include <nanobind/stl/map.h>
-#include <nanobind/stl/shared_ptr.h>
-#include <nanobind/stl/string.h>
-#include <nanobind/stl/vector.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 #include <map>
 #include <memory>
@@ -30,7 +27,7 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
 
-namespace nb = nanobind;
+namespace py = pybind11;
 
 namespace pypto {
 namespace python {
@@ -47,22 +44,22 @@ using pypto::backend::SoC;
 using pypto::ir::CoreType;
 using pypto::ir::MemorySpace;
 
-void BindBackend(nb::module_& m) {
-  nb::module_ backend_mod = m.def_submodule("backend", "PyPTO Backend module");
+void BindBackend(py::module_& m) {
+  py::module_ backend_mod = m.def_submodule("backend", "PyPTO Backend module");
 
   // ========== BackendType enum ==========
-  nb::enum_<BackendType>(backend_mod, "BackendType",
+  py::enum_<BackendType>(backend_mod, "BackendType",
                          "Backend type for passes and codegen (use Instance internally)")
       .value("CCE", BackendType::CCE, "910B CCE backend (C++ codegen)")
       .value("PTO", BackendType::PTO, "910B PTO backend (PTO assembly codegen)");
 
   // ========== Mem class ==========
-  nb::class_<Mem>(backend_mod, "Mem", "Memory component")
-      .def(nb::init<MemorySpace, uint64_t, uint64_t>(), nb::arg("mem_type"), nb::arg("mem_size"),
-           nb::arg("alignment"), "Create a memory component")
-      .def_prop_ro("mem_type", &Mem::GetMemType, "Memory space type")
-      .def_prop_ro("mem_size", &Mem::GetMemSize, "Memory size in bytes")
-      .def_prop_ro("alignment", &Mem::GetAlignment, "Memory alignment in bytes")
+  py::class_<Mem>(backend_mod, "Mem", "Memory component")
+      .def(py::init<MemorySpace, uint64_t, uint64_t>(), py::arg("mem_type"), py::arg("mem_size"),
+           py::arg("alignment"), "Create a memory component")
+      .def_property_readonly("mem_type", &Mem::GetMemType, "Memory space type")
+      .def_property_readonly("mem_size", &Mem::GetMemSize, "Memory size in bytes")
+      .def_property_readonly("alignment", &Mem::GetAlignment, "Memory alignment in bytes")
       .def("__repr__", [](const Mem& mem) {
         return "Mem(type=" + ir::MemorySpaceToString(mem.GetMemType()) +
                ", size=" + std::to_string(mem.GetMemSize()) +
@@ -70,34 +67,34 @@ void BindBackend(nb::module_& m) {
       });
 
   // ========== Core class ==========
-  nb::class_<Core>(backend_mod, "Core", "Processing core")
-      .def(nb::init<CoreType, std::vector<Mem>>(), nb::arg("core_type"), nb::arg("mems"),
+  py::class_<Core>(backend_mod, "Core", "Processing core")
+      .def(py::init<CoreType, std::vector<Mem>>(), py::arg("core_type"), py::arg("mems"),
            "Create a processing core")
-      .def_prop_ro("core_type", &Core::GetCoreType, "Core type (CUBE or VECTOR)")
-      .def_prop_ro("mems", &Core::GetMems, "List of memory components")
+      .def_property_readonly("core_type", &Core::GetCoreType, "Core type (CUBE or VECTOR)")
+      .def_property_readonly("mems", &Core::GetMems, "List of memory components")
       .def("__repr__", [](const Core& core) {
         return "Core(type=" + std::to_string(static_cast<int>(core.GetCoreType())) +
                ", mems=" + std::to_string(core.GetMems().size()) + ")";
       });
 
   // ========== Cluster class ==========
-  nb::class_<Cluster>(backend_mod, "Cluster", "Cluster of processing cores")
-      .def(nb::init<std::map<Core, int>>(), nb::arg("core_counts"), "Create cluster from core counts map")
-      .def(nb::init<const Core&, int>(), nb::arg("core"), nb::arg("count"),
+  py::class_<Cluster>(backend_mod, "Cluster", "Cluster of processing cores")
+      .def(py::init<std::map<Core, int>>(), py::arg("core_counts"), "Create cluster from core counts map")
+      .def(py::init<const Core&, int>(), py::arg("core"), py::arg("count"),
            "Create cluster with single core type")
-      .def_prop_ro("core_counts", &Cluster::GetCoreCounts, "Map of core configurations to counts")
+      .def_property_readonly("core_counts", &Cluster::GetCoreCounts, "Map of core configurations to counts")
       .def("total_core_count", &Cluster::TotalCoreCount, "Get total number of cores in cluster")
       .def("__repr__", [](const Cluster& cluster) {
         return "Cluster(total_cores=" + std::to_string(cluster.TotalCoreCount()) + ")";
       });
 
   // ========== Die class ==========
-  nb::class_<Die>(backend_mod, "Die", "Die containing clusters")
-      .def(nb::init<std::map<Cluster, int>>(), nb::arg("cluster_counts"),
+  py::class_<Die>(backend_mod, "Die", "Die containing clusters")
+      .def(py::init<std::map<Cluster, int>>(), py::arg("cluster_counts"),
            "Create die from cluster counts map")
-      .def(nb::init<const Cluster&, int>(), nb::arg("cluster"), nb::arg("count"),
+      .def(py::init<const Cluster&, int>(), py::arg("cluster"), py::arg("count"),
            "Create die with single cluster type")
-      .def_prop_ro("cluster_counts", &Die::GetClusterCounts, "Map of cluster configurations to counts")
+      .def_property_readonly("cluster_counts", &Die::GetClusterCounts, "Map of cluster configurations to counts")
       .def("total_cluster_count", &Die::TotalClusterCount, "Get total number of clusters in die")
       .def("total_core_count", &Die::TotalCoreCount, "Get total number of cores in die")
       .def("__repr__", [](const Die& die) {
@@ -106,10 +103,10 @@ void BindBackend(nb::module_& m) {
       });
 
   // ========== SoC class ==========
-  nb::class_<SoC>(backend_mod, "SoC", "System on Chip")
-      .def(nb::init<std::map<Die, int>>(), nb::arg("die_counts"), "Create SoC from die counts map")
-      .def(nb::init<const Die&, int>(), nb::arg("die"), nb::arg("count"), "Create SoC with single die type")
-      .def_prop_ro("die_counts", &SoC::GetDieCounts, "Map of die configurations to counts")
+  py::class_<SoC>(backend_mod, "SoC", "System on Chip")
+      .def(py::init<std::map<Die, int>>(), py::arg("die_counts"), "Create SoC from die counts map")
+      .def(py::init<const Die&, int>(), py::arg("die"), py::arg("count"), "Create SoC with single die type")
+      .def_property_readonly("die_counts", &SoC::GetDieCounts, "Map of die configurations to counts")
       .def("total_die_count", &SoC::TotalDieCount, "Get total number of dies in SoC")
       .def("total_cluster_count", &SoC::TotalClusterCount, "Get total number of clusters in SoC")
       .def("total_core_count", &SoC::TotalCoreCount, "Get total number of cores in SoC")
@@ -120,35 +117,35 @@ void BindBackend(nb::module_& m) {
       });
 
   // ========== Backend abstract base class ==========
-  nb::class_<Backend>(backend_mod, "Backend", "Abstract backend base class")
+  py::class_<Backend>(backend_mod, "Backend", "Abstract backend base class")
       .def("get_type_name", &Backend::GetTypeName, "Get backend type name")
-      .def("export_to_file", &Backend::ExportToFile, nb::arg("path"), "Export backend to msgpack file")
+      .def("export_to_file", &Backend::ExportToFile, py::arg("path"), "Export backend to msgpack file")
       .def_static(
           "import_from_file",
           [](const std::string& path) -> Backend* {
-            // Return raw pointer that nanobind will manage
+            // Return raw pointer that pybind11 will manage
             return Backend::ImportFromFile(path).release();
           },
-          nb::arg("path"), nb::rv_policy::take_ownership, "Import backend from msgpack file")
-      .def("find_mem_path", &Backend::FindMemPath, nb::arg("from_mem"), nb::arg("to_mem"),
+          py::arg("path"), py::return_value_policy::take_ownership, "Import backend from msgpack file")
+      .def("find_mem_path", &Backend::FindMemPath, py::arg("from_mem"), py::arg("to_mem"),
            "Find memory path from source to destination")
-      .def("get_mem_size", &Backend::GetMemSize, nb::arg("mem_type"),
+      .def("get_mem_size", &Backend::GetMemSize, py::arg("mem_type"),
            "Get total memory size for given memory type")
-      .def_prop_ro(
+      .def_property_readonly(
           "soc", [](const Backend& backend) -> const SoC& { return backend.GetSoC(); }, "Get SoC object");
 
   // ========== Backend910B_CCE concrete implementation ==========
-  nb::class_<Backend910B_CCE, Backend>(backend_mod, "Backend910B_CCE", "910B CCE backend implementation")
-      .def_static("instance", &Backend910B_CCE::Instance, nb::rv_policy::reference,
+  py::class_<Backend910B_CCE, Backend>(backend_mod, "Backend910B_CCE", "910B CCE backend implementation")
+      .def_static("instance", &Backend910B_CCE::Instance, py::return_value_policy::reference,
                   "Get singleton instance of 910B CCE backend");
 
   // ========== Backend910B_PTO concrete implementation ==========
-  nb::class_<Backend910B_PTO, Backend>(backend_mod, "Backend910B_PTO", "910B PTO backend implementation")
-      .def_static("instance", &Backend910B_PTO::Instance, nb::rv_policy::reference,
+  py::class_<Backend910B_PTO, Backend>(backend_mod, "Backend910B_PTO", "910B PTO backend implementation")
+      .def_static("instance", &Backend910B_PTO::Instance, py::return_value_policy::reference,
                   "Get singleton instance of 910B PTO backend");
 
   // ========== Backend configuration functions ==========
-  backend_mod.def("set_backend_type", &backend::BackendConfig::SetBackendType, nb::arg("backend_type"),
+  backend_mod.def("set_backend_type", &backend::BackendConfig::SetBackendType, py::arg("backend_type"),
                   "Set the global backend type. Must be called before any backend operations. "
                   "Can be called multiple times with the same type (idempotent).");
 

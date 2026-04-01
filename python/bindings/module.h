@@ -21,7 +21,7 @@
 #ifndef PYTHON_BINDINGS_MODULE_H_
 #define PYTHON_BINDINGS_MODULE_H_
 
-#include <nanobind/nanobind.h>
+#include <pybind11/pybind11.h>
 
 namespace pypto {
 namespace python {
@@ -33,9 +33,9 @@ namespace python {
  * an exception translator that converts C++ exceptions to Python exceptions
  * with full stack trace information.
  *
- * @param m The nanobind module object
+ * @param m The pybind11 module object
  */
-void BindErrors(nanobind::module_& m);
+void BindErrors(pybind11::module_& m);
 
 /**
  * @brief Register testing utilities as a submodule
@@ -43,18 +43,18 @@ void BindErrors(nanobind::module_& m);
  * Creates a protected testing submodule containing helper functions
  * for testing error handling and other internal functionality.
  *
- * @param m The parent nanobind module object
+ * @param m The parent pybind11 module object
  */
-void BindTesting(nanobind::module_& m);
+void BindTesting(pybind11::module_& m);
 
 /**
  * @brief Register core types and utilities
  *
  * Registers core PyPTO types including DataType enum and related utility functions.
  *
- * @param m The nanobind module object
+ * @param m The pybind11 module object
  */
-void BindCore(nanobind::module_& m);
+void BindCore(pybind11::module_& m);
 
 /**
  * @brief Register IR (Intermediate Representation) classes
@@ -62,9 +62,9 @@ void BindCore(nanobind::module_& m);
  * Registers all IR node classes including Span, IRNodeNode, Expr, Var, Const,
  * BinaryExpr, and all binary operations (Add, Sub, Mul, Div, Mod).
  *
- * @param m The nanobind module object
+ * @param m The pybind11 module object
  */
-void BindIR(nanobind::module_& m);
+void BindIR(pybind11::module_& m);
 
 /**
  * @brief Register IR Builder for incremental IR construction
@@ -72,9 +72,9 @@ void BindIR(nanobind::module_& m);
  * Registers the IRBuilder class and related context management classes
  * for building IR incrementally with context managers.
  *
- * @param m The nanobind module object
+ * @param m The pybind11 module object
  */
-void BindIRBuilder(nanobind::module_& m);
+void BindIRBuilder(pybind11::module_& m);
 
 /**
  * @brief Register Pass classes for IR transformations
@@ -82,9 +82,9 @@ void BindIRBuilder(nanobind::module_& m);
  * Registers the Pass base class and concrete pass implementations
  * (e.g., InitMemRef, AllocateMemoryAddr) for IR transformations.
  *
- * @param m The nanobind module object
+ * @param m The pybind11 module object
  */
-void BindPass(nanobind::module_& m);
+void BindPass(pybind11::module_& m);
 
 /**
  * @brief Register logging framework types and functions
@@ -92,9 +92,9 @@ void BindPass(nanobind::module_& m);
  * Registers the LogLevel enum and LoggerManager functions for controlling
  * the logging system from Python.
  *
- * @param m The nanobind module object
+ * @param m The pybind11 module object
  */
-void BindLogging(nanobind::module_& m);
+void BindLogging(pybind11::module_& m);
 
 /**
  * @brief Register code generation (codegen) classes
@@ -102,18 +102,18 @@ void BindLogging(nanobind::module_& m);
  * Registers the CCECodegen class and related code generation functionality
  * for converting PyPTO IR to pto-isa C++ code.
  *
- * @param m The nanobind module object
+ * @param m The pybind11 module object
  */
-void BindCodegen(nanobind::module_& m);
+void BindCodegen(pybind11::module_& m);
 
 /**
  * @brief Register backend classes
  *
  * Registers SoC hierarchy, builders, and backend implementations.
  *
- * @param m The nanobind module object
+ * @param m The pybind11 module object
  */
-void BindBackend(nanobind::module_& m);
+void BindBackend(pybind11::module_& m);
 
 // Future binding declarations can be added here:
 // void BindTensors(nanobind::module_& m);

@@ -11,11 +11,9 @@
 
 #include "pypto/ir/transforms/passes.h"
 
-#include <nanobind/nanobind.h>
-#include <nanobind/stl/function.h>
-#include <nanobind/stl/shared_ptr.h>
-#include <nanobind/stl/string.h>
-#include <nanobind/stl/vector.h>
+#include <pybind11/functional.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 #include <string>
 #include <vector>
@@ -27,19 +25,19 @@
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
 
-namespace nb = nanobind;
+namespace py = pybind11;
 
 namespace pypto {
 namespace python {
 
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
-void BindPass(nb::module_& m) {
+void BindPass(py::module_& m) {
   // Create a new 'passes' submodule (using 'passes' instead of 'pass' to avoid Python keyword)
-  nb::module_ passes = m.def_submodule("passes", "IR transformation passes");
+  py::module_ passes = m.def_submodule("passes", "IR transformation passes");
 
   // Bind IRProperty enum
-  nb::enum_<IRProperty>(passes, "IRProperty", "Verifiable IR properties")
+  py::enum_<IRProperty>(passes, "IRProperty", "Verifiable IR properties")
       .value("SSAForm", IRProperty::SSAForm, "IR is in SSA form")
       .value("TypeChecked", IRProperty::TypeChecked, "IR has passed type checking")
       .value("NoNestedCalls", IRProperty::NoNestedCalls, "No nested call expressions")
@@ -53,16 +51,16 @@ void BindPass(nb::module_& m) {
              "All MemRefs have valid addresses within buffer limits");
 
   // Bind IRPropertySet
-  nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
-      .def(nb::init<>(), "Create an empty property set")
-      .def("insert", &IRPropertySet::Insert, nb::arg("prop"), "Insert a property")
-      .def("remove", &IRPropertySet::Remove, nb::arg("prop"), "Remove a property")
-      .def("contains", &IRPropertySet::Contains, nb::arg("prop"), "Check if property is in set")
-      .def("contains_all", &IRPropertySet::ContainsAll, nb::arg("other"),
+  py::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
+      .def(py::init<>(), "Create an empty property set")
+      .def("insert", &IRPropertySet::Insert, py::arg("prop"), "Insert a property")
+      .def("remove", &IRPropertySet::Remove, py::arg("prop"), "Remove a property")
+      .def("contains", &IRPropertySet::Contains, py::arg("prop"), "Check if property is in set")
+      .def("contains_all", &IRPropertySet::ContainsAll, py::arg("other"),
            "Check if set contains all of other")
-      .def("union_with", &IRPropertySet::Union, nb::arg("other"), "Return union of this and other")
-      .def("intersection", &IRPropertySet::Intersection, nb::arg("other"), "Return intersection")
-      .def("difference", &IRPropertySet::Difference, nb::arg("other"), "Return this minus other")
+      .def("union_with", &IRPropertySet::Union, py::arg("other"), "Return union of this and other")
+      .def("intersection", &IRPropertySet::Intersection, py::arg("other"), "Return intersection")
+      .def("difference", &IRPropertySet::Difference, py::arg("other"), "Return this minus other")
       .def("empty", &IRPropertySet::Empty, "Check if empty")
       .def("to_list", &IRPropertySet::ToVector, "Convert to list of properties")
       .def("__str__", &IRPropertySet::ToString)
@@ -71,14 +69,14 @@ void BindPass(nb::module_& m) {
       .def("__ne__", &IRPropertySet::operator!=);
 
   // Bind VerificationMode enum
-  nb::enum_<VerificationMode>(passes, "VerificationMode", "Controls when property verification runs")
+  py::enum_<VerificationMode>(passes, "VerificationMode", "Controls when property verification runs")
       .value("NONE", VerificationMode::None, "No automatic verification")
       .value("BEFORE", VerificationMode::Before, "Verify required properties before each pass")
       .value("AFTER", VerificationMode::After, "Verify produced properties after each pass")
       .value("BEFORE_AND_AFTER", VerificationMode::BeforeAndAfter, "Verify both before and after each pass");
 
   // Bind VerificationLevel enum
-  nb::enum_<VerificationLevel>(passes, "VerificationLevel", "Controls automatic verification in PassPipeline")
+  py::enum_<VerificationLevel>(passes, "VerificationLevel", "Controls automatic verification in PassPipeline")
       .value("NONE", VerificationLevel::None, "No automatic verification (fastest)")
       .value("BASIC", VerificationLevel::Basic, "Verify lightweight properties once per pipeline (default)");
 
@@ -88,72 +86,73 @@ void BindPass(nb::module_& m) {
       "Get the set of properties automatically verified during compilation");
   passes.def("get_default_verification_level", &GetDefaultVerificationLevel,
              "Get the default verification level (from PYPTO_VERIFY_LEVEL env var, default: Basic)");
-  passes.def("verify_properties", &pass::VerifyProperties, nb::arg("properties"), nb::arg("program"),
-             nb::arg("pass_name"), "Verify properties on a program and throw on errors");
+  passes.def("verify_properties", &pass::VerifyProperties, py::arg("properties"), py::arg("program"),
+             py::arg("pass_name"), "Verify properties on a program and throw on errors");
 
   // Pass class - expose call operators and property accessors
-  nb::class_<Pass>(passes, "Pass", "Opaque pass object. Do not instantiate directly - use factory functions.")
-      .def("__call__", &Pass::operator(), nb::arg("program"), "Execute pass on program")
+  py::class_<Pass>(passes, "Pass", "Opaque pass object. Do not instantiate directly - use factory functions.")
+      .def("__call__", &Pass::operator(), py::arg("program"), "Execute pass on program")
       .def("get_name", &Pass::GetName, "Get the name of the pass")
       .def("get_required_properties", &Pass::GetRequiredProperties, "Get required properties")
       .def("get_produced_properties", &Pass::GetProducedProperties, "Get produced properties")
       .def("get_invalidated_properties", &Pass::GetInvalidatedProperties, "Get invalidated properties");
 
   // PassInstrument base class
-  nb::class_<PassInstrument>(passes, "PassInstrument", "Abstract base class for pass instrumentation")
+  py::class_<PassInstrument, std::shared_ptr<PassInstrument>>(passes, "PassInstrument",
+                                                               "Abstract base class for pass instrumentation")
       .def("get_name", &PassInstrument::GetName, "Get the name of this instrument");
 
   // VerificationInstrument
-  nb::class_<VerificationInstrument, PassInstrument>(
+  py::class_<VerificationInstrument, PassInstrument, std::shared_ptr<VerificationInstrument>>(
       passes, "VerificationInstrument", "Instrument that verifies IR properties before/after passes")
-      .def(nb::init<VerificationMode>(), nb::arg("mode"),
+      .def(py::init<VerificationMode>(), py::arg("mode"),
            "Create a verification instrument with the given mode");
 
   // CallbackInstrument
-  nb::class_<CallbackInstrument, PassInstrument>(passes, "CallbackInstrument",
-                                                 "Instrument that invokes callbacks before/after each pass")
-      .def(nb::init<CallbackInstrument::Callback, CallbackInstrument::Callback, std::string>(),
-           nb::arg("before_pass") = nullptr, nb::arg("after_pass") = nullptr,
-           nb::arg("name") = "CallbackInstrument",
+  py::class_<CallbackInstrument, PassInstrument, std::shared_ptr<CallbackInstrument>>(
+      passes, "CallbackInstrument", "Instrument that invokes callbacks before/after each pass")
+      .def(py::init<CallbackInstrument::Callback, CallbackInstrument::Callback, std::string>(),
+           py::arg("before_pass") = nullptr, py::arg("after_pass") = nullptr,
+           py::arg("name") = "CallbackInstrument",
            "Create a callback instrument with optional before/after callbacks");
 
   // ReportType enum
-  nb::enum_<ReportType>(passes, "ReportType", "Type of report to generate")
+  py::enum_<ReportType>(passes, "ReportType", "Type of report to generate")
       .value("Memory", ReportType::Memory, "Memory usage per MemorySpace");
 
   // ReportInstrument
-  nb::class_<ReportInstrument, PassInstrument>(
+  py::class_<ReportInstrument, PassInstrument, std::shared_ptr<ReportInstrument>>(
       passes, "ReportInstrument", "Instrument that generates reports to files after specified passes")
-      .def(nb::init<std::string>(), nb::arg("output_dir"), "Create a report instrument with output directory")
-      .def("enable_report", &ReportInstrument::EnableReport, nb::arg("type"), nb::arg("trigger_pass"),
+      .def(py::init<std::string>(), py::arg("output_dir"), "Create a report instrument with output directory")
+      .def("enable_report", &ReportInstrument::EnableReport, py::arg("type"), py::arg("trigger_pass"),
            "Enable a report type after a specific pass");
 
   // PassContext
-  nb::class_<PassContext>(passes, "PassContext",
+  py::class_<PassContext>(passes, "PassContext",
                           "Context that holds instruments and pass configuration.\n\n"
                           "When active, Pass.__call__ will run the context's instruments\n"
                           "before/after each pass execution. Also controls automatic\n"
                           "verification level for PassPipeline.")
-      .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel>(), nb::arg("instruments"),
-           nb::arg("verification_level") = VerificationLevel::Basic,
+      .def(py::init<std::vector<PassInstrumentPtr>, VerificationLevel>(), py::arg("instruments"),
+           py::arg("verification_level") = VerificationLevel::Basic,
            "Create a PassContext with instruments and optional verification level")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
              return self;
            })
-      .def("__exit__", [](PassContext& self, const nb::args&) { self.ExitContext(); })
+      .def("__exit__", [](PassContext& self, const py::args&) { self.ExitContext(); })
       .def("get_verification_level", &PassContext::GetVerificationLevel,
            "Get the verification level for this context")
       .def("get_instruments", &PassContext::GetInstruments, "Get the instruments registered on this context")
-      .def_static("current", &PassContext::Current, nb::rv_policy::reference,
+      .def_static("current", &PassContext::Current, py::return_value_policy::reference,
                   "Get the currently active context, or None if no context is active");
 
   // PassPipeline class
-  nb::class_<PassPipeline>(passes, "PassPipeline", "A pipeline of passes executed in sequence")
-      .def(nb::init<>(), "Create an empty pipeline")
-      .def("add_pass", &PassPipeline::AddPass, nb::arg("pass_obj"), "Add a pass to the pipeline")
-      .def("run", &PassPipeline::Run, nb::arg("program"), "Execute all passes in sequence")
+  py::class_<PassPipeline>(passes, "PassPipeline", "A pipeline of passes executed in sequence")
+      .def(py::init<>(), "Create an empty pipeline")
+      .def("add_pass", &PassPipeline::AddPass, py::arg("pass_obj"), "Add a pass to the pipeline")
+      .def("run", &PassPipeline::Run, py::arg("program"), "Execute all passes in sequence")
       .def("get_pass_names", &PassPipeline::GetPassNames, "Get names of all passes");
 
   // Factory functions with snake_case names
@@ -179,13 +178,13 @@ void BindPass(nb::module_& m) {
              "Updates MemRef addresses and alloc statement arguments in place.");
 
   // Bind SSAErrorType enum
-  nb::enum_<ssa::ErrorType>(passes, "SSAErrorType", "SSA verification error types")
+  py::enum_<ssa::ErrorType>(passes, "SSAErrorType", "SSA verification error types")
       .value("MULTIPLE_ASSIGNMENT", ssa::ErrorType::MULTIPLE_ASSIGNMENT, "Variable assigned more than once")
       .value("NAME_SHADOWING", ssa::ErrorType::NAME_SHADOWING, "Variable name shadows outer scope variable")
       .value("MISSING_YIELD", ssa::ErrorType::MISSING_YIELD, "ForStmt or IfStmt missing required YieldStmt");
 
   // Bind TypeCheckErrorType enum
-  nb::enum_<typecheck::ErrorType>(passes, "TypeCheckErrorType", "Type checking error types")
+  py::enum_<typecheck::ErrorType>(passes, "TypeCheckErrorType", "Type checking error types")
       .value("TYPE_KIND_MISMATCH", typecheck::ErrorType::TYPE_KIND_MISMATCH, "Type kind mismatch")
       .value("DTYPE_MISMATCH", typecheck::ErrorType::DTYPE_MISMATCH, "Data type mismatch")
       .value("SHAPE_DIMENSION_MISMATCH", typecheck::ErrorType::SHAPE_DIMENSION_MISMATCH,
@@ -195,7 +194,7 @@ void BindPass(nb::module_& m) {
       .value("SIZE_MISMATCH", typecheck::ErrorType::SIZE_MISMATCH, "Vector size mismatch in control flow");
 
   // Bind NestedCallErrorType enum
-  nb::enum_<nested_call::ErrorType>(passes, "NestedCallErrorType", "Nested call verification error types")
+  py::enum_<nested_call::ErrorType>(passes, "NestedCallErrorType", "Nested call verification error types")
       .value("CALL_IN_CALL_ARGS", nested_call::ErrorType::CALL_IN_CALL_ARGS,
              "Call expression appears in call arguments")
       .value("CALL_IN_IF_CONDITION", nested_call::ErrorType::CALL_IN_IF_CONDITION,
@@ -232,38 +231,38 @@ void BindPass(nb::module_& m) {
              "Create a pass that recursively flattens single-statement blocks");
 
   // Bind DiagnosticSeverity enum
-  nb::enum_<DiagnosticSeverity>(passes, "DiagnosticSeverity", "Severity level for diagnostics")
+  py::enum_<DiagnosticSeverity>(passes, "DiagnosticSeverity", "Severity level for diagnostics")
       .value("Error", DiagnosticSeverity::Error, "Error that must be fixed")
       .value("Warning", DiagnosticSeverity::Warning, "Warning that should be reviewed");
 
   // Bind Diagnostic structure
-  nb::class_<Diagnostic>(passes, "Diagnostic", "Single diagnostic message from verification")
-      .def_ro("severity", &Diagnostic::severity, "Severity level (Error or Warning)")
-      .def_ro("rule_name", &Diagnostic::rule_name, "Name of the verification rule")
-      .def_ro("error_code", &Diagnostic::error_code, "Specific error code")
-      .def_ro("message", &Diagnostic::message, "Human-readable error message")
-      .def_ro("span", &Diagnostic::span, "Source location of the issue");
+  py::class_<Diagnostic>(passes, "Diagnostic", "Single diagnostic message from verification")
+      .def_readonly("severity", &Diagnostic::severity, "Severity level (Error or Warning)")
+      .def_readonly("rule_name", &Diagnostic::rule_name, "Name of the verification rule")
+      .def_readonly("error_code", &Diagnostic::error_code, "Specific error code")
+      .def_readonly("message", &Diagnostic::message, "Human-readable error message")
+      .def_readonly("span", &Diagnostic::span, "Source location of the issue");
 
   // Bind IRVerifier class
-  nb::class_<IRVerifier>(passes, "IRVerifier",
+  py::class_<IRVerifier>(passes, "IRVerifier",
                          "IR verification system that manages verification rules\n\n"
                          "IRVerifier collects verification rules and applies them to programs.\n"
                          "Rules can be enabled/disabled individually.")
-      .def(nb::init<>(), "Create an empty verifier with no rules")
+      .def(py::init<>(), "Create an empty verifier with no rules")
       .def_static("create_default", &IRVerifier::CreateDefault,
                   "Create a verifier with default built-in rules (SSAVerify, TypeCheck)")
-      .def("enable_rule", &IRVerifier::EnableRule, nb::arg("name"), "Enable a previously disabled rule")
-      .def("disable_rule", &IRVerifier::DisableRule, nb::arg("name"), "Disable a rule")
-      .def("is_rule_enabled", &IRVerifier::IsRuleEnabled, nb::arg("name"), "Check if a rule is enabled")
-      .def("verify", &IRVerifier::Verify, nb::arg("program"),
+      .def("enable_rule", &IRVerifier::EnableRule, py::arg("name"), "Enable a previously disabled rule")
+      .def("disable_rule", &IRVerifier::DisableRule, py::arg("name"), "Disable a rule")
+      .def("is_rule_enabled", &IRVerifier::IsRuleEnabled, py::arg("name"), "Check if a rule is enabled")
+      .def("verify", &IRVerifier::Verify, py::arg("program"),
            "Verify a program and collect diagnostics (does not throw)")
-      .def("verify_or_throw", &IRVerifier::VerifyOrThrow, nb::arg("program"),
+      .def("verify_or_throw", &IRVerifier::VerifyOrThrow, py::arg("program"),
            "Verify a program and throw VerificationError if errors are found")
-      .def_static("generate_report", &IRVerifier::GenerateReport, nb::arg("diagnostics"),
+      .def_static("generate_report", &IRVerifier::GenerateReport, py::arg("diagnostics"),
                   "Generate a formatted report from diagnostics");
 
   // Bind RunVerifier factory function
-  passes.def("run_verifier", &pass::RunVerifier, nb::arg("disabled_rules") = std::vector<std::string>{},
+  passes.def("run_verifier", &pass::RunVerifier, py::arg("disabled_rules") = std::vector<std::string>{},
              "Create a verifier pass with configurable rules");
 }
 

@@ -18,7 +18,7 @@
  * - Compiler hints and attributes
  * - Utility macros for code generation
  * - Build configuration constants
- * - nanobind module configuration
+ * - pybind11 module configuration
  */
 
 #ifndef PYPTO_CORE_COMMON_H_
@@ -45,11 +45,11 @@ namespace pypto {
 constexpr int64_t kDynamicDim = -1;
 
 // ============================================================================
-// nanobind Module Configuration
+// pybind11 Module Configuration
 // ============================================================================
 
-// Default docstring for the nanobind module
-#define PYPTO_NANOBIND_MODULE_DOC "PyPTO core library"
+// Default docstring for the pybind11 module
+#define PYPTO_MODULE_DOC "PyPTO core library"
 
 // ============================================================================
 // Compiler Hints and Attributes

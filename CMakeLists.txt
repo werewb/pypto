@@ -65,9 +65,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     add_compile_options(-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=.)
 endif()
 
-# Find Python and nanobind
+# Find Python and pybind11
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
-find_package(nanobind CONFIG REQUIRED)
+execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c "import pybind11; print(pybind11.get_cmake_dir())"
+    OUTPUT_VARIABLE _pybind11_cmake_dir OUTPUT_STRIP_TRAILING_WHITESPACE)
+find_package(pybind11 CONFIG REQUIRED PATHS "${_pybind11_cmake_dir}" NO_DEFAULT_PATH)
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
