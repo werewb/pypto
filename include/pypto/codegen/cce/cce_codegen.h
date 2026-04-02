@@ -96,6 +96,21 @@ class CCECodegen : public CodegenBase {
   /** @brief Get the target architecture */
   const std::string& GetArch() const { return arch_; }
 
+  /** @brief Get current section kind (Cube or Vector), nullopt if not in any section */
+  std::optional<ir::SectionKind> GetCurrentSectionKind() const { return current_section_kind_; }
+
+  /** @brief Check if currently generating code inside a Cube section */
+  bool IsInCubeSection() const {
+    return current_section_kind_.has_value() && *current_section_kind_ == ir::SectionKind::Cube;
+  }
+
+  /** @brief Get the base address of a tile variable (from TASSIGN in prologue) */
+  std::string GetTileAddress(const std::string& tile_name) const {
+    auto it = tile_addresses_.find(tile_name);
+    if (it != tile_addresses_.end()) return it->second;
+    return "0x0";
+  }
+
   /**
    * @brief Compute offset from IR tensor shape (for single-file mode without Tensor struct)
    *
@@ -371,6 +386,7 @@ class CCECodegen : public CodegenBase {
   const backend::Backend* backend_;  ///< CCE backend instance (for op info, core type, orchestration)
   bool single_file_mode_ = false;    ///< Whether generating in single-file MIX mode
   std::string arch_ = "a3";          ///< Target architecture ("a2", "a3", "a5")
+  std::optional<ir::SectionKind> current_section_kind_;  ///< Current section being generated (Cube/Vector)
   bool force_dn_layout_ = false;     ///< Temporary flag for DN layout in GenerateGlobalTensorTypeDeclaration
   std::set<std::string> dn_tensors_;  ///< Tensor names loaded with layout="dn" (need Layout::DN)
   std::map<std::string, std::string> tile_addresses_;  ///< tile_name → TASSIGN address expression

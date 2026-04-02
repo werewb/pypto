@@ -216,16 +216,52 @@ static std::string MakeManualMakeTileCodegenCCE(const ir::CallPtr& op, codegen::
 }
 
 // ============================================================================
+// manual.insert — args = [src, index_row, index_col, dst] or [src, index_row, index_col, offset, dst]
+// Emits TINSERT(dst, src, indexRow, indexCol);
+// With offset: Emits TASSIGN(dst, base + offset); TINSERT(...); TASSIGN(dst, base);
+// ============================================================================
+static std::string MakeManualInsertCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+  CHECK(op->args_.size() == 4 || op->args_.size() == 5)
+      << "manual.insert: expected 4 or 5 args, got " << op->args_.size();
+
+  bool has_offset = (op->args_.size() == 5);
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string index_row = codegen.GetExprAsCode(op->args_[1]);
+  std::string index_col = codegen.GetExprAsCode(op->args_[2]);
+  std::string dst, offset, base_addr;
+
+  if (has_offset) {
+    offset = codegen.GetExprAsCode(op->args_[3]);
+    dst = codegen.GetExprAsCode(op->args_[4]);
+    base_addr = codegen.GetTileAddress(dst);
+    codegen.Emit("TASSIGN(" + dst + ", " + base_addr + " + " + offset + ");");
+  } else {
+    dst = codegen.GetExprAsCode(op->args_[3]);
+  }
+
+  codegen.Emit("TINSERT(" + dst + ", " + src + ", " + index_row + ", " + index_col + ");");
+
+  if (has_offset) {
+    codegen.Emit("TASSIGN(" + dst + ", " + base_addr + ");");
+  }
+
+  return "";
+}
+
+// ============================================================================
 // manual.move — args = [src, dst]
-// Emits: TMOV(dst, src);
+// Emits TMOV(dst, src);
 // ============================================================================
 static std::string MakeManualMoveCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
-  CHECK(op->args_.size() == 2) << "manual.move: expected 2 args (src, dst), got " << op->args_.size();
+  CHECK(op->args_.size() == 2)
+      << "manual.move: expected 2 args, got " << op->args_.size();
+
   std::string src = codegen.GetExprAsCode(op->args_[0]);
   std::string dst = codegen.GetExprAsCode(op->args_[1]);
 
-  // Check for acc_to_vec_mode kwarg
+  // Emit TMOV (with or without AccToVecMode)
   if (op->HasKwarg("acc_to_vec_mode")) {
     const std::string& mode_str = op->GetKwarg<std::string>("acc_to_vec_mode");
     std::string mode_enum;
@@ -240,11 +276,11 @@ static std::string MakeManualMoveCodegenCCE(const ir::CallPtr& op, codegen::Code
     } else {
       throw pypto::ValueError("Invalid acc_to_vec_mode: " + mode_str);
     }
-    // Generate TMOV with explicit template parameters: <DstType, SrcType, AccToVecMode>
     codegen.Emit("TMOV<decltype(" + dst + "), decltype(" + src + "), " + mode_enum + ">(" + dst + ", " + src + ");");
   } else {
     codegen.Emit("TMOV(" + dst + ", " + src + ");");
   }
+
   return "";
 }
 
@@ -620,6 +656,12 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "manual.move")
     .set_pipe(ir::PipeType::MTE1)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeManualMoveCodegenCCE(op, codegen);
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "manual.insert")
+    .set_pipe(ir::PipeType::MTE1)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeManualInsertCodegenCCE(op, codegen);
     });
 
 REGISTER_BACKEND_OP(Backend910B_CCE, "manual.ub_copy")

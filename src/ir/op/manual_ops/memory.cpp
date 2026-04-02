@@ -112,7 +112,30 @@ REGISTER_OP("manual.move")
     .add_argument("out", "Pre-allocated destination tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceManualOutTileType(args, kwargs, "manual.move", 2);
+      CHECK(args.size() == 2)
+          << "The operator manual.move requires 2 arguments, but got " << args.size();
+      auto out_type = As<TileType>(args.back()->GetType());
+      CHECK(out_type) << "manual.move: last argument (out) must be TileType";
+      return out_type;
+    });
+
+// manual.insert: (src, index_row, index_col, out) or (src, index_row, index_col, offset, out) -> TileType
+REGISTER_OP("manual.insert")
+    .set_op_category("ManualOp")
+    .set_description(
+        "Manual insert: insert source sub-tile into destination tile at (indexRow, indexCol). "
+        "Corresponds to pto-isa TINSERT instruction for UB→L1 transfer.")
+    .add_argument("src", "Source sub-tile (TileType, Vec memory)")
+    .add_argument("index_row", "Row index where insertion begins")
+    .add_argument("index_col", "Column index where insertion begins")
+    .add_argument("out", "Destination tile (TileType, Mat memory), or offset + out when 5 args")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 4 || args.size() == 5)
+          << "The operator manual.insert requires 4 or 5 arguments, but got " << args.size();
+      auto out_type = As<TileType>(args.back()->GetType());
+      CHECK(out_type) << "manual.insert: last argument (out) must be TileType";
+      return out_type;
     });
 
 // manual.ub_copy: (src_tile, out) -> TileType (out's type)

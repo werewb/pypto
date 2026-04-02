@@ -383,6 +383,32 @@ def move(
     _op("manual.move", [tile.unwrap()], out, **kwargs)
 
 
+def insert(
+    out: Tile,
+    tile: Tile,
+    index_row: int | Expr = 0,
+    index_col: int | Expr = 0,
+    offset: int | Expr | None = None,
+) -> None:
+    """Insert a source sub-tile into destination tile at (index_row, index_col).
+
+    Corresponds to pto-isa TINSERT instruction for UB→L1 transfer.
+
+    Args:
+        out: Pre-allocated destination tile (L1/Mat memory); rebound on return.
+        tile: Source sub-tile (UB/Vec memory).
+        index_row: Row index where insertion begins.
+        index_col: Column index where insertion begins.
+        offset: Optional byte offset for destination tile base address.
+    """
+    row_expr = _normalize_expr(index_row)
+    col_expr = _normalize_expr(index_col)
+    if offset is not None:
+        _op("manual.insert", [tile.unwrap(), row_expr, col_expr, _normalize_expr(offset)], out)
+    else:
+        _op("manual.insert", [tile.unwrap(), row_expr, col_expr], out)
+
+
 def ub_copy(tile: Tile, out: Tile) -> None:
     """Copy a tile within UB memory into a pre-allocated buffer.
 

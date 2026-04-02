@@ -12,6 +12,7 @@
 #include "pypto/codegen/cce/cce_codegen.h"
 
 #include <cstddef>
+#include <functional>
 #include <ios>
 #include <map>
 #include <memory>
@@ -347,6 +348,51 @@ class TileUsageSectionCollector : public ir::IRVisitor {
     }
   }
 };
+
+// Extract valid_shape constructor arguments from a TileType for CCE code generation.
+// Returns row_ctor_arg/col_ctor_arg: the string values to pass to the Tile constructor.
+//   valid_shape[i] is Var(name)    → ctor_arg = var_name (runtime value)
+//   valid_shape[i] is ConstInt(-1) → ctor_arg = shape[i] as string (use full shape)
+//   valid_shape[i] is ConstInt(N)  → ctor_arg = N as string
+//   valid_shape absent             → ctor_arg = "" (caller falls back to rows/cols)
+struct ValidShapeInfo {
+  std::string row_ctor_arg;
+  std::string col_ctor_arg;
+};
+
+inline ValidShapeInfo ExtractValidShapeInfo(const ir::TileTypePtr& tile_type, int64_t rows, int64_t cols,
+                                            std::function<std::string(const ir::VarPtr&)> get_var_name) {
+  ValidShapeInfo info;
+  if (!tile_type->tile_view_.has_value()) return info;
+  const auto& tv = tile_type->tile_view_.value();
+  if (tv.valid_shape.size() >= 1) {
+    if (auto var = ir::As<ir::Var>(tv.valid_shape[0])) {
+      info.row_ctor_arg = get_var_name(var);
+    } else if (auto c = ir::As<ir::ConstInt>(tv.valid_shape[0])) {
+      info.row_ctor_arg = (c->value_ == -1) ? std::to_string(rows) : std::to_string(c->value_);
+    }
+  }
+  if (tv.valid_shape.size() >= 2) {
+    if (auto var = ir::As<ir::Var>(tv.valid_shape[1])) {
+      info.col_ctor_arg = get_var_name(var);
+    } else if (auto c = ir::As<ir::ConstInt>(tv.valid_shape[1])) {
+      info.col_ctor_arg = (c->value_ == -1) ? std::to_string(cols) : std::to_string(c->value_);
+    }
+  }
+  return info;
+}
+
+// Build Tile constructor argument string.
+// If valid_shape was set, use it; otherwise fall back to rows/cols (original behavior).
+inline std::string BuildTileCtorArgs(const ValidShapeInfo& vs, int64_t rows, int64_t cols) {
+  if (!vs.row_ctor_arg.empty() || !vs.col_ctor_arg.empty()) {
+    std::string r = vs.row_ctor_arg.empty() ? std::to_string(rows) : vs.row_ctor_arg;
+    std::string c = vs.col_ctor_arg.empty() ? std::to_string(cols) : vs.col_ctor_arg;
+    return r + ", " + c;
+  }
+  return std::to_string(rows) + ", " + std::to_string(cols);
+}
+
 }  // namespace
 
 void CCECodegen::GenerateSinglePrologue(const ir::FunctionPtr& func, bool has_cross_sync) {
@@ -643,7 +689,10 @@ void CCECodegen::VisitStmt_(const ir::SectionStmtPtr& op) {
 
   // Visit the body
   if (op->body_) {
+    auto prev_section = current_section_kind_;
+    current_section_kind_ = op->section_kind_;
     VisitStmt(op->body_);
+    current_section_kind_ = prev_section;
   }
 
   if (single_file_mode_) {
@@ -1254,16 +1303,17 @@ void CCECodegen::VisitStmt_(const ir::IfStmtPtr& op) {
         std::vector<int64_t> shape_dims = ExtractShapeDimensions(tile_type->shape_);
         int64_t rows = shape_dims.size() >= 1 ? shape_dims[0] : 1;
         int64_t cols = shape_dims.size() >= 2 ? shape_dims[1] : 1;
+        auto vs = ExtractValidShapeInfo(tile_type, rows, cols,
+                                        [this](const ir::VarPtr& v) { return GetVarName(v); });
+        std::string ctor_args = BuildTileCtorArgs(vs, rows, cols);
         std::string type_alias_name = return_var_name + "Type";
         std::string tile_type_str = type_converter_.ConvertTileType(tile_type, rows, cols);
         if (loop_depth_ > 0) {
           loop_hoisted_decls_.push_back("using " + type_alias_name + " = " + tile_type_str + ";");
-          loop_hoisted_decls_.push_back(type_alias_name + " " + return_var_name + "(" +
-                                        std::to_string(rows) + ", " + std::to_string(cols) + ");");
+          loop_hoisted_decls_.push_back(type_alias_name + " " + return_var_name + "(" + ctor_args + ");");
         } else {
           emitter_.EmitLine("using " + type_alias_name + " = " + tile_type_str + ";");
-          emitter_.EmitLine(type_alias_name + " " + return_var_name + "(" +
-                            std::to_string(rows) + ", " + std::to_string(cols) + ");");
+          emitter_.EmitLine(type_alias_name + " " + return_var_name + "(" + ctor_args + ");");
         }
       } else if (auto tensor_type = std::dynamic_pointer_cast<const ir::TensorType>(return_var->GetType())) {
         GenerateGlobalTensorTypeDeclaration(return_var_name, tensor_type);
@@ -2127,6 +2177,11 @@ void CCECodegen::GenerateTileTypeDeclaration(const std::string& var_name, const 
   int64_t rows = shape_dims.size() >= 1 ? shape_dims[0] : 1;
   int64_t cols = shape_dims.size() >= 2 ? shape_dims[1] : 1;
 
+  // Extract valid_shape: compute runtime ctor args.
+  auto vs = ExtractValidShapeInfo(tile_type, rows, cols,
+                                  [this](const ir::VarPtr& v) { return GetVarName(v); });
+  std::string ctor_args = BuildTileCtorArgs(vs, rows, cols);
+
   // Generate Tile type alias (with dedup: reuse alias if same type string already emitted)
   std::string tile_type_str = type_converter_.ConvertTileType(tile_type, rows, cols);
   std::string type_alias_name;
@@ -2157,12 +2212,12 @@ void CCECodegen::GenerateTileTypeDeclaration(const std::string& var_name, const 
         ExtractConstInt((*tile_type->memref_)->addr_);  // NOLINT(bugprone-unchecked-optional-access)
     std::string addr_str = FormatAddressHex(addr);
     emitter_.EmitLine(type_alias_name + " " + var_name + "(" +
-                      std::to_string(rows) + ", " + std::to_string(cols) + "); TASSIGN(" +
+                      ctor_args + "); TASSIGN(" +
                       var_name + ", " + addr_str + ");");
     tile_addresses_[var_name] = addr_str;
   } else {
     emitter_.EmitLine(type_alias_name + " " + var_name + "(" +
-                      std::to_string(rows) + ", " + std::to_string(cols) + ");");
+                      ctor_args + ");");
   }
 }
 

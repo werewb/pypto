@@ -63,6 +63,66 @@ def load_(
 load = load_
 
 
+def move(
+    out: Expr,
+    src: Expr,
+    span: Span | None = None,
+    acc_to_vec_mode: str | None = None,
+) -> Call:
+    """Build manual.move IR call.
+
+    Args:
+        out: Pre-allocated destination tile.
+        src: Source tile expression.
+        span: Optional source span.
+        acc_to_vec_mode: AccToVecMode string for Acc->Vec transfers.
+
+    Returns:
+        Call expression for manual.move.
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict = {}
+    if acc_to_vec_mode is not None:
+        kwargs["acc_to_vec_mode"] = acc_to_vec_mode
+    return _ir_core.create_op_call(
+        "manual.move", [src, out], kwargs, actual_span
+    )
+
+
+def insert(
+    out: Expr,
+    src: Expr,
+    index_row: "int | Expr" = 0,
+    index_col: "int | Expr" = 0,
+    offset: "int | Expr | None" = None,
+    span: Span | None = None,
+) -> Call:
+    """Build manual.insert IR call.
+
+    Args:
+        out: Pre-allocated destination tile.
+        src: Source sub-tile expression.
+        index_row: Row index where insertion begins.
+        index_col: Column index where insertion begins.
+        offset: Optional byte offset for destination tile base address.
+        span: Optional source span.
+
+    Returns:
+        Call expression for manual.insert.
+    """
+    actual_span = _get_span_or_capture(span)
+    row_expr = _normalize_expr(index_row)
+    col_expr = _normalize_expr(index_col)
+    if offset is not None:
+        offset_expr = _normalize_expr(offset)
+        return _ir_core.create_op_call(
+            "manual.insert", [src, row_expr, col_expr, offset_expr, out], {}, actual_span
+        )
+    return _ir_core.create_op_call(
+        "manual.insert", [src, row_expr, col_expr, out], {}, actual_span
+    )
+
+
 def store(
     out: Expr,
     tile: Expr,
